@@ -61,7 +61,7 @@ BLACKLIST_GROUP_ROLE_ID = 1536922110612611092
 # ID de ton serveur, pour que les commandes slash apparaissent instantanément
 # dessus pendant les tests (sinon ça peut prendre jusqu'à 1h en sync globale).
 # Laisse à 0 pour une synchronisation globale (tous les serveurs, plus lente à jour).
-TEST_GUILD_ID = 0
+TEST_GUILD_ID = 1468687370160312474
 
 EMBED_COLOR = discord.Colour(0xFFFFFF)  # blanc
 
