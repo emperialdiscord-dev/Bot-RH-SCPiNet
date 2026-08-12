@@ -7,6 +7,7 @@ import json
 import time
 import datetime
 from dotenv import load_dotenv
+from keep_alive import keep_alive
 
 # ============================================================
 #                      CONFIGURATION
@@ -25,8 +26,8 @@ ROLE_LEVELS = {
 
 # Niveau minimum requis pour chaque commande (modifiable directement ici)
 COMMAND_LEVELS = {
-    "avertir": 1,
-    "sanctions": 1,
+    "avertir": 2,
+    "sanctions": 2,
     "timeout": 2,
     "expulser": 3,
     "bannir-temp": 3,
@@ -34,7 +35,28 @@ COMMAND_LEVELS = {
     "add-role": 4,
     "del-role": 4,
     "bannir-perm": 5,
+    "blacklist": 1,
+    "unblacklist": 1,
 }
+
+# ID du rôle "Blacklist X" à donner/retirer pour chaque département
+DEPARTMENT_ROLES = {
+    "Administratif": 1536924662846455899,
+    "ASIA": 1536924762352390214,
+    "Médical": 1536924806035804310,
+    "DSI": 1536924899694608484,
+    "DJI": 1536924932208857088,
+    "FIM": 1536925062689718323,
+    "Scientifique": 1536925021560373329,
+    "Logistique": 1536925452113940570,
+    "DI&ST": 1536925405112574104,
+    "CE": 1536924867629289492,
+    "Sécuritaire": 1536924731331313734,
+}
+
+# ID du rôle "BLACKLISTS" qui regroupe tout le monde ayant au moins une blacklist.
+# Ajouté automatiquement au premier /blacklist, jamais retiré par /unblacklist.
+BLACKLIST_GROUP_ROLE_ID = 1536922110612611092
 
 # ID de ton serveur, pour que les commandes slash apparaissent instantanément
 # dessus pendant les tests (sinon ça peut prendre jusqu'à 1h en sync globale).
@@ -291,6 +313,58 @@ async def del_role(interaction: discord.Interaction, membre: discord.Member, rol
     await membre.remove_roles(role)
     await interaction.response.send_message(f"✅ Rôle {role.mention} retiré à {membre.mention}.")
 
+
+@bot.tree.command(name="blacklist", description="Blacklister un membre d'un département")
+@app_commands.choices(departement=[
+    app_commands.Choice(name=nom, value=nom) for nom in DEPARTMENT_ROLES
+])
+@require_level("blacklist")
+async def blacklist(interaction: discord.Interaction, membre: discord.Member, departement: app_commands.Choice[str]):
+    role = interaction.guild.get_role(DEPARTMENT_ROLES.get(departement.value, 0))
+    if role is None:
+        return await interaction.response.send_message(
+            "❌ Ce rôle de blacklist n'est pas encore configuré, préviens un admin.", ephemeral=True
+        )
+    if role in membre.roles:
+        return await interaction.response.send_message(
+            f"❌ {membre.mention} est déjà blacklist **{departement.value}**.", ephemeral=True
+        )
+    await membre.add_roles(role)
+
+    groupe = interaction.guild.get_role(BLACKLIST_GROUP_ROLE_ID)
+    if groupe and groupe not in membre.roles:
+        await membre.add_roles(groupe)
+
+    embed = discord.Embed(title="🚫 Blacklist ajoutée", color=EMBED_COLOR)
+    embed.add_field(name="Membre", value=membre.mention)
+    embed.add_field(name="Département", value=departement.value)
+    embed.add_field(name="Par", value=interaction.user.mention)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="unblacklist", description="Retirer un membre de la blacklist d'un département")
+@app_commands.choices(departement=[
+    app_commands.Choice(name=nom, value=nom) for nom in DEPARTMENT_ROLES
+])
+@require_level("unblacklist")
+async def unblacklist(interaction: discord.Interaction, membre: discord.Member, departement: app_commands.Choice[str]):
+    role = interaction.guild.get_role(DEPARTMENT_ROLES.get(departement.value, 0))
+    if role is None:
+        return await interaction.response.send_message(
+            "❌ Ce rôle de blacklist n'est pas encore configuré, préviens un admin.", ephemeral=True
+        )
+    if role not in membre.roles:
+        return await interaction.response.send_message(
+            f"❌ {membre.mention} n'est pas blacklist **{departement.value}**.", ephemeral=True
+        )
+    await membre.remove_roles(role)
+    # Le rôle groupe BLACKLISTS n'est jamais retiré ici, même si c'était la dernière blacklist du membre.
+    embed = discord.Embed(title="✅ Blacklist retirée", color=EMBED_COLOR)
+    embed.add_field(name="Membre", value=membre.mention)
+    embed.add_field(name="Département", value=departement.value)
+    embed.add_field(name="Par", value=interaction.user.mention)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 # ============================================================
 #              COMMANDES SLASH — PERMISSIONS & CASIER
 # ============================================================
@@ -323,7 +397,7 @@ async def sanctions_cmd(interaction: discord.Interaction, membre: discord.Member
             value=f"Raison : {s['reason']}\nPar : {mod.mention if mod else s['moderator']}",
             inline=False,
         )
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="del-san", description="Supprimer une sanction du casier d'un membre")
@@ -355,27 +429,27 @@ async def del_san(interaction: discord.Interaction, membre: discord.Member, nume
 @bot.command(name="règlement", aliases=["reglement"])
 async def reglement(ctx):
     embed = discord.Embed(
-        title="📜 Règlement — Fondation SCP, Site-42",
-        description="Merci de lire attentivement les règles ci-dessous avant de participer aux activités RH.",
+        title="Règlement — Fondation SCP, Site-42",
+        description="Merci de lire attentivement les règles ci-dessous avant de participer aux activités du serveur.",
         color=EMBED_COLOR,
     )
     embed.add_field(
-        name="1️⃣ Respect",
+        name="Respect",
         value="Aucune insulte, discrimination ou harcèlement envers un autre membre du personnel.",
         inline=False,
     )
     embed.add_field(
-        name="2️⃣ Hiérarchie",
-        value="Les décisions des Ressources Humaines sont à respecter. Tout désaccord se règle en message privé avec un responsable, jamais publiquement.",
+        name="Hiérarchie",
+        value="Les décisions des Ressources Humaines sont à respecter. Tout désaccord se règle en ticket avec un responsable, jamais publiquement.",
         inline=False,
     )
     embed.add_field(
-        name="3️⃣ Sanctions",
+        name="Sanctions",
         value="Toute sanction (avertissement, timeout, expulsion, bannissement) est justifiée et consignée dans le casier du membre concerné.",
         inline=False,
     )
     embed.add_field(
-        name="4️⃣ Confidentialité",
+        name="Confidentialité",
         value="Les informations RH échangées ici ne doivent pas être partagées en dehors du service.",
         inline=False,
     )
@@ -383,4 +457,5 @@ async def reglement(ctx):
     await ctx.send(embed=embed)
 
 
+keep_alive()
 bot.run(TOKEN)
