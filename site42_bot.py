@@ -16,6 +16,7 @@ from keep_alive import keep_alive
 # ============================================================
 
 # Niveau de permission associé à chaque rôle (1 = le plus bas, 5 = le plus haut)
+# Niveau de permission associé à chaque rôle (1 = le plus bas, 5 = le plus haut)
 ROLE_LEVELS = {
     1: 1504065271365767282,  # rôle donnant le niveau 1
     2: 1526705153078591628,
@@ -58,6 +59,12 @@ DEPARTMENT_ROLES = {
 # Ajouté automatiquement au premier /blacklist, jamais retiré par /unblacklist.
 BLACKLIST_GROUP_ROLE_ID = 1536922110612611092
 
+# ID du rôle donné automatiquement quand un membre clique sur "J'accepte le règlement"
+RULES_ACCEPT_ROLE_ID = 1537590169752834108
+
+# ID du salon FORUM où seront créés les posts "Rapport de Service de X"
+SERVICE_FORUM_CHANNEL_ID = 1537586598051586069
+
 # ID de ton serveur, pour que les commandes slash apparaissent instantanément
 # dessus pendant les tests (sinon ça peut prendre jusqu'à 1h en sync globale).
 # Laisse à 0 pour une synchronisation globale (tous les serveurs, plus lente à jour).
@@ -73,11 +80,16 @@ DATA_FILE = "data.json"
 
 def load_data():
     if not os.path.exists(DATA_FILE):
-        return {"sanctions": {}, "tempbans": {}}
+        return {"sanctions": {}, "tempbans": {}, "logs_channel": 0, "services": {"active": {}, "history": {}, "panel": {"channel_id": 0, "message_id": 0}}}
     with open(DATA_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
         data.setdefault("sanctions", {})
         data.setdefault("tempbans", {})
+        data.setdefault("logs_channel", 0)
+        data.setdefault("services", {"active": {}, "history": {}, "panel": {"channel_id": 0, "message_id": 0}})
+        data["services"].setdefault("active", {})
+        data["services"].setdefault("history", {})
+        data["services"].setdefault("panel", {"channel_id": 0, "message_id": 0})
         return data
 
 
@@ -124,6 +136,39 @@ def parse_duration(duration_str):
     return int(value) * multipliers[unit]
 
 
+def format_duration(seconds):
+    seconds = int(seconds)
+    jours, reste = divmod(seconds, 86400)
+    heures, reste = divmod(reste, 3600)
+    minutes, _ = divmod(reste, 60)
+    parts = []
+    if jours:
+        parts.append(f"{jours}j")
+    if heures:
+        parts.append(f"{heures}h")
+    parts.append(f"{minutes}min")
+    return " ".join(parts)
+
+
+def get_total_service_time(member_id, data):
+    member_id = str(member_id)
+    total = sum(s["duration"] for s in data["services"]["history"].get(member_id, []))
+    active = data["services"]["active"].get(member_id)
+    if active:
+        elapsed = time.time() - active["start"] - active.get("total_pause", 0)
+        if active.get("pause_start"):
+            elapsed -= (time.time() - active["pause_start"])
+        total += max(0, elapsed)
+    return total
+
+
+def find_active_by_channel(data, channel_id):
+    for member_id, info in data["services"]["active"].items():
+        if info.get("channel_id") == channel_id:
+            return member_id, info
+    return None, None
+
+
 def get_level(member: discord.Member):
     ids = [role.id for role in member.roles]
     if member.guild_permissions.administrator:
@@ -166,11 +211,56 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
-bot = commands.Bot(command_prefix=".", intents=intents)
+async def log_command_usage(interaction: discord.Interaction):
+    if interaction.guild is None or interaction.command is None:
+        return
+    data = load_data()
+    channel_id = data.get("logs_channel", 0)
+    if not channel_id:
+        return
+    channel = interaction.guild.get_channel(channel_id)
+    if not channel:
+        return
+
+    try:
+        options = vars(interaction.namespace)
+    except Exception:
+        options = {}
+    details = ", ".join(f"**{k}** : {v}" for k, v in options.items()) if options else "Aucun argument"
+
+    embed = discord.Embed(title="📝 Commande slash utilisée", color=EMBED_COLOR)
+    embed.add_field(name="Commande", value=f"`/{interaction.command.qualified_name}`", inline=False)
+    embed.add_field(name="Arguments", value=details, inline=False)
+    embed.add_field(name="Auteur", value=interaction.user.mention)
+    embed.add_field(name="Salon", value=interaction.channel.mention if interaction.channel else "N/A")
+    embed.timestamp = datetime.datetime.utcnow()
+    await channel.send(embed=embed)
+
+
+class LoggingCommandTree(app_commands.CommandTree):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.type == discord.InteractionType.application_command:
+            await log_command_usage(interaction)
+        return True
+
+
+bot = commands.Bot(command_prefix=".", intents=intents, tree_cls=LoggingCommandTree)
+
+
+@bot.command(name="logs")
+@commands.has_permissions(administrator=True)
+async def logs_cmd(ctx):
+    data = load_data()
+    data["logs_channel"] = ctx.channel.id
+    save_data(data)
+    await ctx.send(f"✅ Ce salon ({ctx.channel.mention}) est maintenant configuré comme salon des logs. Chaque commande `/` y sera enregistrée.")
 
 
 @bot.event
 async def on_ready():
+    bot.add_view(RulesAcceptView())
+    bot.add_view(ServiceStartView())
+    bot.add_view(ServiceReportView())
     if TEST_GUILD_ID:
         guild = discord.Object(id=TEST_GUILD_ID)
         bot.tree.copy_global_to(guild=guild)
@@ -426,35 +516,274 @@ async def del_san(interaction: discord.Interaction, membre: discord.Member, nume
 #              COMMANDES PRÉFIXE "." — RÈGLEMENT
 # ============================================================
 
+class RulesAcceptView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="J'accepte le règlement", style=discord.ButtonStyle.success, emoji="✅", custom_id="accept_rules")
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        role = interaction.guild.get_role(RULES_ACCEPT_ROLE_ID)
+        if role is None:
+            return await interaction.response.send_message(
+                "❌ Le rôle n'est pas encore configuré, préviens un admin.", ephemeral=True
+            )
+        if role in interaction.user.roles:
+            return await interaction.response.send_message("Tu as déjà accepté le règlement ✅", ephemeral=True)
+        await interaction.user.add_roles(role)
+        await interaction.response.send_message("✅ Règlement accepté, accès débloqué !", ephemeral=True)
+
+
 @bot.command(name="règlement", aliases=["reglement"])
 async def reglement(ctx):
+    embed1 = discord.Embed(color=EMBED_COLOR, description=(
+        "⚠️ __**COMPORTEMENT GÉNÉRAL**__\n\n"
+        "1️⃣ **RESPECT ABSOLU:**\n"
+        "<a:4572bluearrowright:1112740907465326722> Toute forme d'insulte, attaque personnelle, provocation, harcèlement, moquerie ou discrimination est formellement interdite. Les membres doivent se traiter avec **respect et courtoisie**, sans exception.\n\n"
+        "2️⃣ **LANGUAGE :**\n"
+        "<a:4572bluearrowright:1112740907465326722> Le serveur est **100 % francophone**. Toute communication doit être rédigée en **français correct**, avec des phrases complètes et compréhensibles.\n\n"
+        "3️⃣ **RESPECT DES DEFUNTS:**\n"
+        "<a:4572bluearrowright:1112740907465326722> Toute remarque irrespectueuse, moquerie ou provocation envers une personne décédée est **strictement prohibée**, sans justification possible.\n\n"
+        "4️⃣ **DEBATS POLITIQUES :**\n"
+        "<a:4572bluearrowright:1112740907465326722> Les débats sont autorisés **dans la mesure où ils restent constructifs, argumentés et respectueux**. Les attaques personnelles et les comportements agressifs sont interdits.\n\n"
+        "5️⃣ **TENSIONS:**\n"
+        "<a:4572bluearrowright:1112740907465326722> La politique est un sujet sensible : **gardez votre sang-froid** et évitez toute escalade conflictuelle. Le calme et la maturité sont de rigueur.\n\n"
+        "6️⃣ **CONTOURNEMENT DU RÈGLEMENT:**\n"
+        "<a:4572bluearrowright:1112740907465326722> Toute tentative de contournement du présent règlement, notamment par la création de salons, de fils de discussion (topics), ou de tout autre moyen visant à ignorer, subvertir ou délibérément enfreindre les règles établies pour le bon fonctionnement du serveur, sera considérée comme une infraction grave et entraînera des sanctions immédiates.\n\n"
+        "🗨️ __**CONTENU AUTORISÉ ET INTERDIT**__\n\n"
+        "1️⃣ **THEMATIQUE POLITIQUE:**\n"
+        "<a:4572bluearrowright:1112740907465326722> Les discussions doivent impérativement **rester centrées sur la politique**. Les hors-sujets prolongés seront modérés.\n\n"
+        "2️⃣ **CONTENU OFFENSANT:**\n"
+        "<a:4572bluearrowright:1112740907465326722> Tout propos **raciste, sexiste, homophobe, discriminatoire, haineux ou diffamatoire** est strictement interdit.\n\n"
+        "3️⃣ **RELIGION:**\n"
+        "<a:4572bluearrowright:1112740907465326722> **Les citations religieuses** (Bible, Coran, Tanakh, etc.) sont **interdites**, même dans un but argumentatif.\n\n"
+        "4️⃣ **PROPAGANDE, VIOLENCE:**\n"
+        "<a:4572bluearrowright:1112740907465326722> **La propagande extrémiste**, l'apologie du terrorisme, l'incitation à la haine ou à la violence **ne seront jamais tolérées**.\n\n"
+        "📚 __**PARTAGE D'INFORMATION**__\n\n"
+        "1️⃣ **FAKE NEWS & THÉORIES DU COMPLOT:**\n"
+        "<a:4572bluearrowright:1112740907465326722> La diffusion de **fausses informations ou de théories complotistes** est strictement interdite.\n\n"
+        "2️⃣ **CONTENU ILLÉGAL OU INAPPROPRIÉ:**\n"
+        "<a:4572bluearrowright:1112740907465326722> Le partage de contenu pornographique, choquant, violent ou illégal est interdit et pourra entraîner un bannissement immédiat."
+    ))
+
+    embed2 = discord.Embed(color=EMBED_COLOR, description=(
+        "🚫 __**PUBLICITÉ ET PROMOTION**__\n\n"
+        "1️⃣ **AUCUNE PUBLICITÉ SANS AUTORISATION :**\n"
+        "<a:4572bluearrowright:1112740907465326722> La promotion de **serveurs, produits, services ou liens affiliés** est interdite sans l'autorisation explicite de l'équipe de modération.\n\n"
+        "2️⃣ **PARTAGE DE CONTENU PERSONNEL :**\n"
+        "<a:4572bluearrowright:1112740907465326722> Si vous souhaitez partager votre contenu (vidéo, article, etc.), **faites-le uniquement dans les canaux dédiés**, sans spam ni interférer avec les discussions en cours.\n\n"
+        "👤 __**IDENTITÉ VISUELLE (PSEUDO & AVATAR)**__\n\n"
+        "1️⃣ **CONFORMITÉ OBLIGATOIRE :**\n"
+        "<a:4572bluearrowright:1112740907465326722> Tous les pseudos et photos de profil doivent respecter les **Conditions d'utilisation de Discord** et les règles du serveur.\n\n"
+        "2️⃣ **PSEUDOS INACCEPTABLES :**\n"
+        "<a:4572bluearrowright:1112740907465326722> Interdiction d'utiliser un pseudo contenant :\n"
+        "● Des propos offensants, haineux ou discriminatoires.\n"
+        "● Du spam, des caractères spéciaux illisibles ou des émojis excessifs.\n"
+        "● Des informations personnelles (nom complet, numéro de téléphone, e-mail, etc.).\n\n"
+        "3️⃣ **PHOTOS DE PROFIL :**\n"
+        "<a:4572bluearrowright:1112740907465326722> Les avatars ne doivent pas :\n"
+        "● Contenir de contenu offensant, choquant ou à caractère sexuel.\n"
+        "● Représenter des célébrités, personnalités politiques ou logos sans droit.\n"
+        "● Induire les autres en erreur sur votre identité.\n\n"
+        "4️⃣ **USURPATION & CONFUSION :**\n"
+        "<a:4572bluearrowright:1112740907465326722> L'usage de pseudos ou d'avatars similaires à ceux d'autres membres ou personnalités publiques est **strictement interdit**.\n"
+        "● Choisir un rôle politique qui ne correspond pas à ses idées pour se faire passer pour quelqu'un d'autre est interdit.\n"
+        "Soyez honnêtes avec vous-mêmes et avec les autres.\n\n"
+        "5️⃣ **DOUBLES COMPTES :**\n"
+        "<a:4572bluearrowright:1112740907465326722> La possession de **plus d'un compte Discord actif sur le serveur est interdite**.\n\n"
+        "**L'équipe de modération**\n\n"
+        "Les sanctions décidées par la modération ne doivent en aucun cas être contestées sur le Discord.\n"
+        "Toute demande de contestation ou explication doit être faite uniquement via le système de ticket dans le canal dédié.\n\n"
+        "Contester une sanction à la place de quelqu'un d'autre n'est pas autorisé.\n\n"
+        "Il est strictement interdit de contacter la modération en message privé pour discuter d'une sanction ou de toute autre décision.\n\n"
+        "Toute discussion publique à ce sujet pourra entraîner une sanction.\n\n"
+        "**Ignorer ce règlement ne constitue pas une excuse.\n"
+        "En rejoignant ce serveur, vous acceptez l'ensemble de ces règles.**"
+    ))
+
+    await ctx.send(embeds=[embed1, embed2], view=RulesAcceptView())
+
+# ============================================================
+#                 SYSTÈME DE SERVICE
+# ============================================================
+
+async def refresh_service_panel(guild):
+    data = load_data()
+    panel = data["services"]["panel"]
+    if not panel.get("channel_id") or not panel.get("message_id"):
+        return
+    channel = guild.get_channel(panel["channel_id"])
+    if not channel:
+        return
+    try:
+        message = await channel.fetch_message(panel["message_id"])
+    except (discord.NotFound, discord.Forbidden):
+        return
+
+    actifs = data["services"]["active"]
     embed = discord.Embed(
-        title="Règlement — Fondation SCP, Site-42",
-        description="Merci de lire attentivement les règles ci-dessous avant de participer aux activités du serveur.",
+        title=f"🔎 Utilisateurs en service - ({len(actifs)})",
         color=EMBED_COLOR,
     )
-    embed.add_field(
-        name="Respect",
-        value="Aucune insulte, discrimination ou harcèlement envers un autre membre du personnel.",
-        inline=False,
+    if not actifs:
+        embed.description = "Aucun utilisateur n'est en service... :("
+    else:
+        lignes = []
+        for member_id, info in actifs.items():
+            membre = guild.get_member(int(member_id))
+            statut = "⏸️ En pause" if info.get("pause_start") else "🟢 En service"
+            lignes.append(f"{membre.mention if membre else member_id} — {statut}")
+        embed.description = "\n".join(lignes)
+    embed.set_footer(text="Si le bot ne répond pas, cela peut signifier qu'il redémarre.")
+    await message.edit(embed=embed)
+
+
+class ServiceStartView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Démarrer son service", style=discord.ButtonStyle.success, emoji="✨", custom_id="start_service")
+    async def start_service(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = load_data()
+        member_id = str(interaction.user.id)
+        if member_id in data["services"]["active"]:
+            return await interaction.response.send_message("❌ Tu es déjà en service.", ephemeral=True)
+
+        forum = interaction.guild.get_channel(SERVICE_FORUM_CHANNEL_ID)
+        if not isinstance(forum, discord.ForumChannel):
+            return await interaction.response.send_message(
+                "❌ SERVICE_FORUM_CHANNEL_ID ne pointe pas vers un salon Forum valide, préviens un admin.", ephemeral=True
+            )
+
+        embed = discord.Embed(
+            title=f"Rapports de Service de {interaction.user.display_name}",
+            description="Service démarré ! Utilise les boutons ci-dessous pour gérer ta pause ou terminer ton service.",
+            color=EMBED_COLOR,
+        )
+        thread_with_message = await forum.create_thread(
+            name=f"Rapport de Service de {interaction.user.display_name}",
+            content=interaction.user.mention,
+            embed=embed,
+            view=ServiceReportView(),
+        )
+        salon = thread_with_message.thread
+
+        data["services"]["active"][member_id] = {
+            "start": time.time(),
+            "pause_start": None,
+            "total_pause": 0,
+            "channel_id": salon.id,
+        }
+        save_data(data)
+
+        await interaction.response.send_message(f"✅ Ton service a démarré : {salon.mention}", ephemeral=True)
+        await refresh_service_panel(interaction.guild)
+
+
+class ServiceReportView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Prendre / Terminer sa pause", style=discord.ButtonStyle.primary, emoji="🍎", custom_id="pause_service")
+    async def pause_service(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = load_data()
+        member_id, info = find_active_by_channel(data, interaction.channel.id)
+        if member_id is None:
+            return await interaction.response.send_message("❌ Aucun service actif trouvé pour ce salon.", ephemeral=True)
+        if interaction.user.id != int(member_id):
+            return await interaction.response.send_message("❌ Seul le titulaire de ce service peut faire ça.", ephemeral=True)
+
+        if info.get("pause_start"):
+            pause_duree = time.time() - info["pause_start"]
+            info["total_pause"] = info.get("total_pause", 0) + pause_duree
+            info["pause_start"] = None
+            save_data(data)
+            await interaction.response.send_message(f"▶️ Pause terminée ({format_duration(pause_duree)}). Bon retour !")
+        else:
+            info["pause_start"] = time.time()
+            save_data(data)
+            await interaction.response.send_message("⏸️ Pause commencée. Prends ton temps !")
+        await refresh_service_panel(interaction.guild)
+
+    @discord.ui.button(label="Terminer son service", style=discord.ButtonStyle.danger, emoji="🌙", custom_id="end_service")
+    async def end_service(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = load_data()
+        member_id, info = find_active_by_channel(data, interaction.channel.id)
+        if member_id is None:
+            return await interaction.response.send_message("❌ Aucun service actif trouvé pour ce salon.", ephemeral=True)
+        if interaction.user.id != int(member_id):
+            return await interaction.response.send_message("❌ Seul le titulaire de ce service peut faire ça.", ephemeral=True)
+
+        total_pause = info.get("total_pause", 0)
+        if info.get("pause_start"):
+            total_pause += time.time() - info["pause_start"]
+
+        duree = time.time() - info["start"] - total_pause
+        data["services"]["history"].setdefault(member_id, [])
+        data["services"]["history"][member_id].append({
+            "start": info["start"], "end": time.time(), "duration": duree
+        })
+        del data["services"]["active"][member_id]
+        save_data(data)
+
+        embed = discord.Embed(title="🌙 Service terminé", color=EMBED_COLOR)
+        embed.add_field(name="Durée totale", value=format_duration(duree))
+        embed.add_field(name="Temps de pause", value=format_duration(total_pause))
+        await interaction.response.send_message(embed=embed)
+
+        await interaction.channel.edit(name=f"Terminé — Rapport de {interaction.user.display_name}", locked=True, archived=True)
+        await refresh_service_panel(interaction.guild)
+
+
+@bot.command(name="servicepanel")
+@commands.has_permissions(administrator=True)
+async def servicepanel(ctx):
+    data = load_data()
+    embed = discord.Embed(title="🔎 Utilisateurs en service - (0)", description="Aucun utilisateur n'est en service... :(", color=EMBED_COLOR)
+    embed.set_footer(text="Si le bot ne répond pas, cela peut signifier qu'il redémarre.")
+    message = await ctx.send(embed=embed, view=ServiceStartView())
+    data["services"]["panel"] = {"channel_id": ctx.channel.id, "message_id": message.id}
+    save_data(data)
+
+
+def build_classement(data):
+    membres_ids = set(data["services"]["history"].keys()) | set(data["services"]["active"].keys())
+    return sorted(
+        ((mid, get_total_service_time(mid, data)) for mid in membres_ids),
+        key=lambda x: x[1], reverse=True
     )
-    embed.add_field(
-        name="Hiérarchie",
-        value="Les décisions des Ressources Humaines sont à respecter. Tout désaccord se règle en ticket avec un responsable, jamais publiquement.",
-        inline=False,
-    )
-    embed.add_field(
-        name="Sanctions",
-        value="Toute sanction (avertissement, timeout, expulsion, bannissement) est justifiée et consignée dans le casier du membre concerné.",
-        inline=False,
-    )
-    embed.add_field(
-        name="Confidentialité",
-        value="Les informations RH échangées ici ne doivent pas être partagées en dehors du service.",
-        inline=False,
-    )
-    embed.set_footer(text="En restant sur ce serveur, tu acceptes ce règlement.")
-    await ctx.send(embed=embed)
+
+
+@bot.tree.command(name="topservice", description="Voir le classement du temps de service")
+async def topservice(interaction: discord.Interaction):
+    data = load_data()
+    classement = build_classement(data)
+    if not classement:
+        return await interaction.response.send_message("Personne n'a encore effectué de service.", ephemeral=True)
+    embed = discord.Embed(title="🏆 Classement du temps de service", color=EMBED_COLOR)
+    for i, (member_id, total) in enumerate(classement[:15], start=1):
+        membre = interaction.guild.get_member(int(member_id))
+        embed.add_field(name=f"#{i} — {membre.display_name if membre else member_id}", value=format_duration(total), inline=False)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="monservice", description="Voir ton temps de service total et ta position au classement")
+async def monservice(interaction: discord.Interaction):
+    data = load_data()
+    classement = build_classement(data)
+    member_id = str(interaction.user.id)
+    total = get_total_service_time(member_id, data)
+
+    if total == 0:
+        return await interaction.response.send_message("Tu n'as encore jamais effectué de service.", ephemeral=True)
+
+    rang = next((i for i, (mid, _) in enumerate(classement, start=1) if mid == member_id), None)
+    en_service = member_id in data["services"]["active"]
+
+    embed = discord.Embed(title=f"🕒 Ton service — {interaction.user.display_name}", color=EMBED_COLOR)
+    embed.add_field(name="Temps total", value=format_duration(total))
+    embed.add_field(name="Classement", value=f"#{rang} / {len(classement)}")
+    embed.add_field(name="Statut actuel", value="🟢 En service" if en_service else "⚪ Hors service", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 keep_alive()
