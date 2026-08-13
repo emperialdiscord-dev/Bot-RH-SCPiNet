@@ -603,7 +603,7 @@ async def reglement(ctx):
     await ctx.send(embeds=[embed1, embed2], view=RulesAcceptView())
 
 # ============================================================
-#                 SYSTÈME DE SERVICE
+#                  SYSTÈME DE SERVICE
 # ============================================================
 
 async def refresh_service_panel(guild):
@@ -641,7 +641,7 @@ class ServiceStartView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Démarrer son service", style=discord.ButtonStyle.success, emoji="📤​", custom_id="start_service")
+    @discord.ui.button(label="Démarrer son service", style=discord.ButtonStyle.success, emoji="📤", custom_id="start_service")
     async def start_service(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = load_data()
         member_id = str(interaction.user.id)
@@ -704,7 +704,7 @@ class ServiceReportView(discord.ui.View):
             await interaction.response.send_message("⏸️ Pause commencée. Prends ton temps !")
         await refresh_service_panel(interaction.guild)
 
-    @discord.ui.button(label="Terminer son service", style=discord.ButtonStyle.danger, emoji="📥​", custom_id="end_service")
+    @discord.ui.button(label="Terminer son service", style=discord.ButtonStyle.danger, emoji="📥", custom_id="end_service")
     async def end_service(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = load_data()
         member_id, info = find_active_by_channel(data, interaction.channel.id)
