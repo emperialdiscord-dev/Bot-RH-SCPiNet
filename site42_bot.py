@@ -283,7 +283,7 @@ async def help_command(ctx):
         embed.add_field(name=name, value=value, inline=False)
     await ctx.send(embed=embed)
 
-@bot.command(name="invite")
+@bot.command(name="invite", aliases=["server-invite"])
 async def invite_cmd(ctx):
     invite = await ctx.channel.create_invite(max_age=86400, max_uses=0, unique=True)
     await reply_embed(ctx, "Invitation", invite.url, "link")
@@ -557,42 +557,62 @@ async def scan_cmd(ctx, membre: Optional[discord.Member] = None):
 # ============================================================
 
 class TicketPanelView(discord.ui.View):
+    """Boutons affichés juste sous l'embed, dans le même message Discord."""
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Créer un ticket", style=discord.ButtonStyle.primary,
-                       custom_id="site42_ticket_create")
-    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _create_ticket(self, interaction: discord.Interaction, category_name: str):
         guild = interaction.guild
+        if guild is None:
+            return await interaction.response.send_message(
+                embed=make_embed("Erreur", "Cette action doit être utilisée sur un serveur.", "error"),
+                ephemeral=True)
+
         data = load_data()
         existing = data["tickets"].get(str(interaction.user.id))
         if existing and guild.get_channel(existing):
             return await interaction.response.send_message(
                 embed=make_embed("Ticket déjà ouvert", f"Ton ticket : <#{existing}>", "warning"),
                 ephemeral=True)
+
         category = guild.get_channel(TICKET_CATEGORY_ID) if TICKET_CATEGORY_ID else None
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
         }
+        if guild.me:
+            overwrites[guild.me] = discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True)
         if TICKET_STAFF_ROLE_ID:
             staff_role = guild.get_role(TICKET_STAFF_ROLE_ID)
             if staff_role:
                 overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+
+        safe_name = re.sub(r"[^a-z0-9-]", "", interaction.user.name.lower().replace(" ", "-"))[:70] or "membre"
         channel = await guild.create_text_channel(
-            name=f"ticket-{interaction.user.name}".lower().replace(" ", "-")[:90],
+            name=f"ticket-{safe_name}",
+            topic=f"Type : {category_name} | Ouvert par {interaction.user} ({interaction.user.id})",
             category=category if isinstance(category, discord.CategoryChannel) else None,
             overwrites=overwrites,
-            reason=f"Ticket ouvert par {interaction.user}")
+            reason=f"Ticket {category_name} ouvert par {interaction.user}")
         data["tickets"][str(interaction.user.id)] = channel.id
         save_data(data)
-        await channel.send(embed=make_embed("Ticket ouvert",
-            f"Bonjour {interaction.user.mention}, explique ta demande.\nLe staff peut utiliser les boutons ci-dessous.",
+        await channel.send(embed=make_embed(
+            f"Ticket — {category_name}",
+            f"Bonjour {interaction.user.mention}, explique ta demande.\nLe staff peut utiliser le bouton ci-dessous pour fermer ce ticket.",
             "ticket"), view=TicketControlView())
         await interaction.response.send_message(
-            embed=make_embed("Ticket créé", f"Ton ticket est {channel.mention}.", "success"),
+            embed=make_embed("Ticket créé", f"Ton ticket {category_name.lower()} est {channel.mention}.", "success"),
             ephemeral=True)
+
+    @discord.ui.button(label="Achat de bot", style=discord.ButtonStyle.secondary,
+                       custom_id="site42_ticket_purchase", row=0)
+    async def purchase_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._create_ticket(interaction, "Achat de bot")
+
+    @discord.ui.button(label="Problème Bots", style=discord.ButtonStyle.secondary,
+                       custom_id="site42_ticket_support", row=0)
+    async def support_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._create_ticket(interaction, "Problème Bots")
 
 class TicketControlView(discord.ui.View):
     def __init__(self):
@@ -616,8 +636,11 @@ class TicketControlView(discord.ui.View):
 
 @bot.command(name="ticket")
 async def ticket_cmd(ctx):
-    await ctx.send(embed=make_embed("Support Site42",
-        "Clique sur le bouton ci-dessous pour ouvrir un ticket privé.", "ticket"),
+    await ctx.send(embed=make_embed("Support Ticket",
+        "• *Pour toute demande concernant :*\n"
+        "  ◦ Des questions sur les tarifs ou un achat de bot\n"
+        "  ◦ Des problèmes techniques liés à un bot\n\n"
+        "Choisis le bouton correspondant ci-dessous pour ouvrir un ticket privé.", "ticket"),
         view=TicketPanelView())
 
 @bot.command(name="add")
@@ -659,9 +682,8 @@ async def ticket_stats(ctx):
 # ============================================================
 
 class GiveawayJoinView(discord.ui.View):
-    def __init__(self, message_id: int):
+    def __init__(self):
         super().__init__(timeout=None)
-        self.message_id = message_id
 
     @discord.ui.button(label="Participer", style=discord.ButtonStyle.success,
                        custom_id="site42_giveaway_join")
@@ -692,9 +714,9 @@ async def giveaway_cmd(ctx, duree: str, gagnants: int, *, lot: str):
     ends = time.time() + seconds
     embed = make_embed("Giveaway", f"**Lot :** {lot}\n**Gagnants :** {gagnants}\n"
         f"**Fin :** <t:{int(ends)}:R>\n**Organisé par :** {ctx.author.mention}", "giveaway")
-    message = await ctx.send(embed=embed, view=discord.ui.View(timeout=None))
-    view = GiveawayJoinView(message.id)
-    await message.edit(view=view)
+    # Les boutons doivent être envoyés avec l’embed dès le premier envoi.
+    view = GiveawayJoinView()
+    message = await ctx.send(embed=embed, view=view)
     data = load_data()
     data["giveaways"][str(message.id)] = {
         "channel": ctx.channel.id, "guild": ctx.guild.id, "ends": ends,
@@ -897,11 +919,6 @@ async def delperm_cmd(ctx, membre: discord.Member, role: discord.Role):
     await membre.remove_roles(role)
     await reply_embed(ctx, "Permission retirée", f"Rôle {role.mention} retiré à {membre.mention}.", "success")
 
-@bot.command(name="server-invite")
-async def server_invite_alias(ctx):
-    invite = await ctx.channel.create_invite(max_age=86400, max_uses=0)
-    await reply_embed(ctx, "Invitation du serveur", invite.url, "link")
-
 @bot.command(name="online-status")
 async def online_status(ctx):
     await reply_embed(ctx, "État du bot", f"Connecté en tant que {bot.user}.", "bot")
@@ -919,6 +936,14 @@ async def on_ready():
     if not persistent_views_registered:
         bot.add_view(TicketPanelView())
         bot.add_view(TicketControlView())
+        # Réenregistre les boutons de chaque giveaway actif après un redémarrage.
+        saved = load_data()
+        for message_id, giveaway in saved.get("giveaways", {}).items():
+            if not giveaway.get("ended"):
+                try:
+                    bot.add_view(GiveawayJoinView(), message_id=int(message_id))
+                except (ValueError, discord.HTTPException):
+                    pass
         persistent_views_registered = True
     print(f"Site42 connecté : {bot.user} (ID: {bot.user.id})")
 
