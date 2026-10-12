@@ -556,10 +556,39 @@ async def scan_cmd(ctx, membre: Optional[discord.Member] = None):
 # TICKETS AVEC BOUTONS
 # ============================================================
 
-class TicketPanelView(discord.ui.View):
-    """Boutons affichés juste sous l'embed, dans le même message Discord."""
+class TicketPanelView(discord.ui.LayoutView):
+    """Panneau de tickets en Components V2 : texte et boutons dans le même conteneur."""
     def __init__(self):
         super().__init__(timeout=None)
+
+        container = discord.ui.Container(
+            discord.ui.TextDisplay("## Support Ticket"),
+            discord.ui.TextDisplay(
+                "• *Pour toute demande concernant :*\\n"
+                "  ◦ Des questions sur les tarifs ou un achat de bot\\n"
+                "  ◦ Des problèmes techniques liés à un bot\\n\\n"
+                "Choisis le bouton correspondant ci-dessous pour ouvrir un ticket privé."
+            ),
+            accent_colour=discord.Colour.blurple()
+        )
+
+        row = discord.ui.ActionRow()
+        purchase = discord.ui.Button(
+            label="Achat de bot",
+            style=discord.ButtonStyle.secondary,
+            custom_id="site42_ticket_purchase"
+        )
+        support = discord.ui.Button(
+            label="Problème Bots",
+            style=discord.ButtonStyle.secondary,
+            custom_id="site42_ticket_support"
+        )
+        purchase.callback = self.purchase_ticket
+        support.callback = self.support_ticket
+        row.add_item(purchase)
+        row.add_item(support)
+        container.add_item(row)
+        self.add_item(container)
 
     async def _create_ticket(self, interaction: discord.Interaction, category_name: str):
         guild = interaction.guild
@@ -598,20 +627,16 @@ class TicketPanelView(discord.ui.View):
         save_data(data)
         await channel.send(embed=make_embed(
             f"Ticket — {category_name}",
-            f"Bonjour {interaction.user.mention}, explique ta demande.\nLe staff peut utiliser le bouton ci-dessous pour fermer ce ticket.",
+            f"Bonjour {interaction.user.mention}, explique ta demande.\\nLe staff peut utiliser le bouton ci-dessous pour fermer ce ticket.",
             "ticket"), view=TicketControlView())
         await interaction.response.send_message(
             embed=make_embed("Ticket créé", f"Ton ticket {category_name.lower()} est {channel.mention}.", "success"),
             ephemeral=True)
 
-    @discord.ui.button(label="Achat de bot", style=discord.ButtonStyle.secondary,
-                       custom_id="site42_ticket_purchase", row=0)
-    async def purchase_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def purchase_ticket(self, interaction: discord.Interaction):
         await self._create_ticket(interaction, "Achat de bot")
 
-    @discord.ui.button(label="Problème Bots", style=discord.ButtonStyle.secondary,
-                       custom_id="site42_ticket_support", row=0)
-    async def support_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def support_ticket(self, interaction: discord.Interaction):
         await self._create_ticket(interaction, "Problème Bots")
 
 class TicketControlView(discord.ui.View):
@@ -636,12 +661,8 @@ class TicketControlView(discord.ui.View):
 
 @bot.command(name="ticket")
 async def ticket_cmd(ctx):
-    await ctx.send(embed=make_embed("Support Ticket",
-        "• *Pour toute demande concernant :*\n"
-        "  ◦ Des questions sur les tarifs ou un achat de bot\n"
-        "  ◦ Des problèmes techniques liés à un bot\n\n"
-        "Choisis le bouton correspondant ci-dessous pour ouvrir un ticket privé.", "ticket"),
-        view=TicketPanelView())
+    # Components V2 : le panneau et ses boutons sont contenus dans le même cadre.
+    await ctx.send(view=TicketPanelView())
 
 @bot.command(name="add")
 async def ticket_add(ctx, membre: discord.Member):
