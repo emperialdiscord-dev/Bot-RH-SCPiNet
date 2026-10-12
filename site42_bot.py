@@ -283,7 +283,7 @@ async def help_command(ctx):
         embed.add_field(name=name, value=value, inline=False)
     await ctx.send(embed=embed)
 
-@bot.command(name="invite", aliases=["server-invite"])
+@bot.command(name="invite")
 async def invite_cmd(ctx):
     invite = await ctx.channel.create_invite(max_age=86400, max_uses=0, unique=True)
     await reply_embed(ctx, "Invitation", invite.url, "link")
@@ -911,13 +911,16 @@ async def online_status(ctx):
 # DÉMARRAGE
 # ============================================================
 
-async def restore_persistent_views():
-    bot.add_view(TicketPanelView())
-    bot.add_view(TicketControlView())
+persistent_views_registered = False
 
 @bot.event
-async def setup_hook():
-    await restore_persistent_views()
+async def on_ready():
+    global persistent_views_registered
+    if not persistent_views_registered:
+        bot.add_view(TicketPanelView())
+        bot.add_view(TicketControlView())
+        persistent_views_registered = True
+    print(f"Site42 connecté : {bot.user} (ID: {bot.user.id})")
 
 def main():
     if not TOKEN:
