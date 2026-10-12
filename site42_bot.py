@@ -21,15 +21,6 @@ import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-# Flask / keep-alive est facultatif. Si tu utilises un hébergeur qui le nécessite,
-# ajoute ton propre keep_alive.py. Le bot fonctionne sans ce module.
-try:
-    from keep_alive import keep_alive
-except ImportError:
-    def keep_alive():
-        return None
-
-
 # ============================================================
 # CONFIGURATION
 # ============================================================
@@ -931,7 +922,6 @@ async def setup_hook():
 def main():
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN est absent du fichier .env.")
-    keep_alive()
     bot.run(TOKEN)
 
 if __name__ == "__main__":
