@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-SITE42 BOT — script complet de base
+BOT DISCORD — script complet
 Dépendances : discord.py, python-dotenv, flask
 Pré-requis : définir DISCORD_TOKEN dans le fichier .env.
 
@@ -28,8 +28,11 @@ from threading import Thread
 # ============================================================
 
 PREFIX = "="
-DATA_FILE = "site42_data.json"
-EMBED_COLOR = discord.Colour(0xFFFFFF)
+DATA_FILE = "bot_data.json"
+BLUE = discord.Colour(0x2563EB)
+RED = discord.Colour(0xDC2626)
+BLACK = discord.Colour(0x000000)
+EMBED_COLOR = BLUE
 
 # Remplace chaque valeur par TON emoji personnalisé.
 # Format statique : <:nom:ID> | animé : <a:nom:ID>
@@ -174,11 +177,11 @@ def edit_data(callback):
 
 def make_embed(title: str, description: Optional[str] = None,
                emoji: str = "info", color: Optional[discord.Colour] = None):
-    # Embeds sans signature Site42 ni date/heure automatique.
+    # Aucun pied de page ni horodatage automatique.
     return discord.Embed(
         title=f"{em(emoji)} {title}",
         description=description,
-        color=color or EMBED_COLOR,
+        color=color or (RED if emoji in {"error", "warning", "ticket_close"} else EMBED_COLOR),
     )
 
 def parse_duration(value: str) -> Optional[int]:
@@ -295,7 +298,7 @@ async def guild_only_check(ctx):
 
 @bot.command(name="help", aliases=["aide"])
 async def help_command(ctx):
-    embed = make_embed("Commandes Site42", emoji="bot")
+    embed = make_embed(f"Commandes de {ctx.guild.name}", emoji="bot")
     sections = {
         "Informations": "`=help`, `=invite`, `=server-invite`, `=stats-logs`, `=pic`, `=banner`",
         "Modération": "`=warn`, `=sanction`, `=tempmute`, `=mute`, `=unmute`, `=ban`, `=tempban`, `=unban`, `=kick`, `=rank`, `=derank`, `=add-role`, `=del-role`, `=del-sanction`, `=mutelist`, `=banlist`, `=adminlist`, `=staff-list`",
@@ -634,12 +637,12 @@ class TicketSetupView(discord.ui.View):
         self.panel_title = "Centre de support"
         self.panel_description = "Choisis une catégorie ci-dessous pour ouvrir un ticket privé."
 
-    @discord.ui.button(label="Boutons", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Boutons", style=discord.ButtonStyle.primary, row=0)
     async def choose_buttons(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.mode = "buttons"
         await interaction.response.send_message("Format choisi : boutons.", ephemeral=True)
 
-    @discord.ui.button(label="Menu déroulant", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Menu déroulant", style=discord.ButtonStyle.primary, row=0)
     async def choose_dropdown(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.mode = "select"
         await interaction.response.send_message("Format choisi : menu déroulant.", ephemeral=True)
@@ -650,7 +653,7 @@ class TicketSetupView(discord.ui.View):
             return await interaction.response.send_message("La limite Discord est de 25 options par menu.", ephemeral=True)
         await interaction.response.send_modal(TicketOptionModal(self))
 
-    @discord.ui.button(label="Choisir le salon et publier", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="Choisir le salon et publier", style=discord.ButtonStyle.primary, row=1)
     async def publish(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self.options:
             return await interaction.response.send_message("Ajoute au moins une option avant de publier.", ephemeral=True)
@@ -681,7 +684,7 @@ class TicketPublishChannelView(discord.ui.View):
         guild_data.setdefault("ticket_panels", {})[panel_id] = panel
         save_data(data)
         view = DynamicTicketPanelView(panel)
-        embed = make_embed(panel["title"], panel["description"], "ticket")
+        embed = make_embed(f"{panel['title']} — {interaction.guild.name}", panel["description"], "ticket")
         for opt in panel["options"]:
             roles = ", ".join(f"<@&{rid}>" for rid in opt["role_ids"]) or "Aucun rôle dédié"
             embed.add_field(name=opt["name"], value=(opt.get("description") or "Ouvre un ticket") + f"\n**Rôles :** {roles}", inline=False)
@@ -705,7 +708,7 @@ class DynamicTicketPanelView(discord.ui.View):
             self.add_item(select)
         else:
             for index, option in enumerate(panel["options"][:25]):
-                button = discord.ui.Button(label=option["name"][:80], style=discord.ButtonStyle.secondary, custom_id=f"s42:ticket:button:{panel['id']}:{index}")
+                button = discord.ui.Button(label=option["name"][:80], style=discord.ButtonStyle.primary, custom_id=f"s42:ticket:button:{panel['id']}:{index}")
                 async def callback(interaction, index=index):
                     await self.create_ticket(interaction, index)
                 button.callback = callback
@@ -803,7 +806,7 @@ class TicketControlView(discord.ui.View):
             await interaction.channel.set_permissions(interaction.user, view_channel=True, send_messages=True, read_message_history=True)
         await interaction.response.send_message(f"Ticket pris en charge par {interaction.user.mention}. Seuls l'auteur, la personne assignée et les personnes autorisées (WL) peuvent écrire.")
 
-    @discord.ui.button(label="Rename", style=discord.ButtonStyle.secondary, custom_id="s42:ticket:rename")
+    @discord.ui.button(label="Rename", style=discord.ButtonStyle.primary, custom_id="s42:ticket:rename")
     async def rename_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         data, gd, key, ticket = self._ticket_record(interaction)
         if not ticket or not can_manage_ticket(interaction.user, ticket):
@@ -900,7 +903,7 @@ class GiveawayJoinView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Participer", style=discord.ButtonStyle.success,
+    @discord.ui.button(label="Participer", style=discord.ButtonStyle.primary,
                        custom_id="site42_giveaway_join")
     async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = load_data()
@@ -1166,7 +1169,7 @@ async def on_ready():
                 except (ValueError, discord.HTTPException):
                     pass
         persistent_views_registered = True
-    print(f"Site42 connecté : {bot.user} (ID: {bot.user.id})")
+    print(f"Bot connecté : {bot.user} (ID: {bot.user.id})")
 
 # Petit endpoint HTTP pour Render Web Service gratuit.
 # Le bot Discord reste le processus principal ; Flask écoute sur le port fourni par Render.
@@ -1174,7 +1177,7 @@ web_app = Flask(__name__)
 
 @web_app.get("/")
 def health_check():
-    return "Site42 bot is running", 200
+    return "Bot is running", 200
 
 def run_web_server():
     port = int(os.environ.get("PORT", "10000"))
