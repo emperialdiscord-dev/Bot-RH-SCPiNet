@@ -370,8 +370,12 @@ async def warn_cmd(ctx, membre: discord.Member, *, raison="Aucune raison précis
     })
     save_data(data)
     await send_dm(membre, "Avertissement reçu", f"Serveur : {ctx.guild.name}\nRaison : {raison}")
-    await reply_embed(ctx, "Avertissement ajouté",
-                      f"Membre : {membre.mention}\nModérateur : {ctx.author.mention}\nRaison : {raison}", "warning")
+    await ctx.send(
+        f"Avertissement ajouté sur **{ctx.guild.name}**.\n"
+        f"Membre : {membre.mention}\n"
+        f"Modérateur : {ctx.author.mention}\n"
+        f"Raison : {raison}"
+    )
     await log_action(ctx.guild, "Avertissement", f"{membre.mention} — {raison} — par {ctx.author.mention}")
 
 @bot.command(name="sanction", aliases=["sanctions"])
@@ -397,8 +401,10 @@ async def del_sanction_cmd(ctx, membre: discord.Member, numero: int):
         return await reply_embed(ctx, "Sanction introuvable", "Numéro de sanction invalide.", "error")
     removed = items.pop(numero - 1)
     save_data(data)
-    await reply_embed(ctx, "Sanction supprimée",
-                      f"{removed['type']} retirée pour {membre.mention}.", "success")
+    await ctx.send(
+        f"Sanction supprimée sur **{ctx.guild.name}**.\n"
+        f"{removed['type']} retirée pour {membre.mention}."
+    )
 
 @bot.command(name="tempmute")
 async def tempmute_cmd(ctx, membre: discord.Member, duree: str, *, raison="Aucune raison précisée"):
@@ -415,28 +421,32 @@ async def tempmute_cmd(ctx, membre: discord.Member, duree: str, *, raison="Aucun
     })
     save_data(data)
     await send_dm(membre, "Timeout appliqué", f"Durée : {duree}\nRaison : {raison}")
-    await reply_embed(ctx, "Timeout appliqué",
-                      f"Membre : {membre.mention}\nDurée : {duree}\nRaison : {raison}", "moderation")
+    await ctx.send(
+        f"Timeout appliqué sur **{ctx.guild.name}**.\n"
+        f"Membre : {membre.mention}\nDurée : {duree}\nRaison : {raison}"
+    )
 
 @bot.command(name="mute")
 async def mute_cmd(ctx, membre: discord.Member, *, raison="Aucune raison précisée"):
     if not await staff_check(ctx, "mute"): return
     await membre.timeout(discord.utils.utcnow() + datetime.timedelta(days=28), reason=raison)
-    await reply_embed(ctx, "Membre réduit au silence",
-                      f"{membre.mention}\nDurée maximale Discord : 28 jours.\nRaison : {raison}", "moderation")
+    await ctx.send(
+        f"Membre réduit au silence sur **{ctx.guild.name}**.\n"
+        f"Membre : {membre.mention}\nDurée maximale Discord : 28 jours.\nRaison : {raison}"
+    )
 
 @bot.command(name="unmute")
 async def unmute_cmd(ctx, membre: discord.Member):
     if not await staff_check(ctx, "mute"): return
     await membre.timeout(None, reason=f"Unmute par {ctx.author}")
-    await reply_embed(ctx, "Timeout retiré", f"{membre.mention} peut de nouveau parler.", "success")
+    await ctx.send(f"Timeout retiré sur **{ctx.guild.name}** : {membre.mention} peut de nouveau parler.")
 
 @bot.command(name="ban")
 async def ban_cmd(ctx, membre: discord.Member, *, raison="Aucune raison précisée"):
     if not await staff_check(ctx, "ban"): return
     await send_dm(membre, "Bannissement", f"Serveur : {ctx.guild.name}\nRaison : {raison}")
     await membre.ban(reason=raison)
-    await reply_embed(ctx, "Membre banni", f"{membre} — {raison}", "moderation")
+    await ctx.send(f"Membre banni de **{ctx.guild.name}** : {membre}\nRaison : {raison}")
     await log_action(ctx.guild, "Bannissement", f"{membre} — {raison}")
 
 @bot.command(name="tempban")
@@ -452,21 +462,23 @@ async def tempban_cmd(ctx, membre: discord.Member, duree: str, *, raison="Aucune
     save_data(data)
     await send_dm(membre, "Bannissement temporaire", f"Durée : {duree}\nRaison : {raison}")
     await membre.ban(reason=raison)
-    await reply_embed(ctx, "Bannissement temporaire",
-                      f"{membre} — durée : {duree}\nRaison : {raison}", "moderation")
+    await ctx.send(
+        f"Bannissement temporaire de **{ctx.guild.name}** : {membre}\n"
+        f"Durée : {duree}\nRaison : {raison}"
+    )
 
 @bot.command(name="unban")
 async def unban_cmd(ctx, user_id: int, *, raison="Levée du bannissement"):
     if not await staff_check(ctx, "unban"): return
     await ctx.guild.unban(discord.Object(id=user_id), reason=raison)
-    await reply_embed(ctx, "Bannissement levé", f"ID : `{user_id}`\nRaison : {raison}", "success")
+    await ctx.send(f"Bannissement levé sur **{ctx.guild.name}**.\nID : `{user_id}`\nRaison : {raison}")
 
 @bot.command(name="kick")
 async def kick_cmd(ctx, membre: discord.Member, *, raison="Aucune raison précisée"):
     if not await staff_check(ctx, "kick"): return
     await send_dm(membre, "Expulsion", f"Raison : {raison}")
     await membre.kick(reason=raison)
-    await reply_embed(ctx, "Membre expulsé", f"{membre} — {raison}", "moderation")
+    await ctx.send(f"Membre expulsé de **{ctx.guild.name}** : {membre}\nRaison : {raison}")
 
 @bot.command(name="rank")
 async def rank_cmd(ctx, membre: discord.Member, niveau: int):
