@@ -613,7 +613,7 @@ class TicketRolePickView(discord.ui.View):
     def __init__(self, setup_view):
         super().__init__(timeout=300)
         self.setup_view = setup_view
-        self.add_item(discord.ui.RoleSelect(placeholder="Rôles autorisés", min_values=1, max_values=25, custom_id="site42_setup_role_select"))
+        self.add_item(discord.ui.RoleSelect(placeholder="Rôles autorisés", min_values=1, max_values=25, custom_id="s42_setup_role_select"))
         self.children[0].callback = self.roles_selected
 
     async def roles_selected(self, interaction: discord.Interaction):
@@ -658,6 +658,44 @@ class TicketSetupView(discord.ui.View):
         if not self.options:
             return await interaction.response.send_message("Ajoute au moins une option avant de publier.", ephemeral=True)
         await interaction.response.send_message("Dans quel salon publier le panel ?", view=TicketPublishChannelView(self), ephemeral=True)
+
+
+class TicketSetupLayoutView(discord.ui.LayoutView):
+    """Panneau Components V2 : texte et boutons dans le même conteneur."""
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=900)
+        self.state = TicketSetupView(guild_id)
+        self.container = discord.ui.Container(
+            discord.ui.TextDisplay("## Configuration des tickets\nChoisis le format, ajoute les options, sélectionne les rôles autorisés et publie le panneau dans le salon souhaité."),
+            discord.ui.Separator(),
+            discord.ui.ActionRow(
+                discord.ui.Button(label="Boutons", style=discord.ButtonStyle.primary, custom_id="s42:setup:buttons"),
+                discord.ui.Button(label="Menu déroulant", style=discord.ButtonStyle.primary, custom_id="s42:setup:select"),
+            ),
+            discord.ui.ActionRow(
+                discord.ui.Button(label="Ajouter une option", style=discord.ButtonStyle.primary, custom_id="s42:setup:add"),
+                discord.ui.Button(label="Choisir le salon et publier", style=discord.ButtonStyle.danger, custom_id="s42:setup:publish"),
+            ),
+            accent_colour=discord.Colour(0x000000),
+        )
+        self.add_item(self.container)
+        buttons = [item for row in self.container.children if isinstance(row, discord.ui.ActionRow) for item in row.children]
+        buttons[0].callback = self.choose_buttons
+        buttons[1].callback = self.choose_dropdown
+        buttons[2].callback = self.add_option
+        buttons[3].callback = self.publish
+
+    async def choose_buttons(self, interaction: discord.Interaction):
+        await self.state.choose_buttons(interaction, None)
+
+    async def choose_dropdown(self, interaction: discord.Interaction):
+        await self.state.choose_dropdown(interaction, None)
+
+    async def add_option(self, interaction: discord.Interaction):
+        await self.state.add_option(interaction, None)
+
+    async def publish(self, interaction: discord.Interaction):
+        await self.state.publish(interaction, None)
 
 
 class TicketPublishChannelView(discord.ui.View):
@@ -756,7 +794,7 @@ class DynamicTicketPanelView(discord.ui.View):
             overwrites[owner_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
         channel = await guild.create_text_channel(
             name=f"{safe_option}-{safe_user}"[:95], category=category, overwrites=overwrites,
-            topic=f"site42_ticket|panel={panel['id']}|option={option['name']}|owner={interaction.user.id}",
+            topic=f"ticket|panel={panel['id']}|option={option['name']}|owner={interaction.user.id}",
             reason=f"Ticket {option['name']} ouvert par {interaction.user}")
         active[key] = {"channel_id": channel.id, "user_id": interaction.user.id, "panel_id": panel["id"], "option": option["name"], "role_ids": option.get("role_ids", []), "claimed_by": None}
         save_data(data)
@@ -834,7 +872,7 @@ def can_manage_ticket(member, ticket):
 @bot.command(name="ticket")
 @commands.has_permissions(manage_guild=True)
 async def ticket_cmd(ctx):
-    await ctx.send(embed=make_embed("Configuration des tickets", "Choisis le format, ajoute les options, sélectionne les rôles autorisés et publie le panel dans le salon souhaité.", "ticket"), view=TicketSetupView(ctx.guild.id))
+    await ctx.send(view=TicketSetupLayoutView(ctx.guild.id))
 
 
 @bot.command(name="add")
@@ -904,7 +942,7 @@ class GiveawayJoinView(discord.ui.View):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="Participer", style=discord.ButtonStyle.primary,
-                       custom_id="site42_giveaway_join")
+                       custom_id="s42_giveaway_join")
     async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
         data = load_data()
         giveaway = data["giveaways"].get(str(interaction.message.id))
