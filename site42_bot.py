@@ -624,8 +624,9 @@ class TicketRolePickView(discord.ui.View):
         self.setup_state.options.append(self.setup_state.pending_option)
         added_name = self.setup_state.pending_option["name"]
         self.setup_state.pending_option = None
+        # Components V2 interdit le paramètre `content` dans send_message.
+        # On renvoie le panneau V2 lui-même, qui contient déjà le texte et les boutons.
         await interaction.response.send_message(
-            f"Option ajoutée : **{added_name}**. Ajoute d'autres options ou choisis le salon de publication.",
             view=self.setup_layout_view, ephemeral=True)
 
 
