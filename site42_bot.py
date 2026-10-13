@@ -699,9 +699,21 @@ class TicketPublishChannelView(discord.ui.View):
         self.children[0].callback = self.channel_selected
 
     async def channel_selected(self, interaction: discord.Interaction):
-        channel = self.children[0].values[0]
+        # ChannelSelect peut renvoyer un AppCommandChannel et non un TextChannel
+        # selon la version de discord.py. Résoudre l'ID via le cache du serveur.
+        selected = self.children[0].values[0]
+        selected_id = getattr(selected, "id", None)
+        channel = interaction.guild.get_channel(selected_id) if interaction.guild and selected_id else None
+        if channel is None and selected_id:
+            try:
+                channel = await interaction.guild.fetch_channel(selected_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                channel = None
         if not isinstance(channel, discord.TextChannel):
-            return await interaction.response.send_message("Choisis un salon textuel.", ephemeral=True)
+            return await interaction.response.send_message(
+                "Le salon sélectionné n'est pas un salon textuel accessible. Choisis un salon de texte classique.",
+                ephemeral=True,
+            )
         data = load_data()
         guild_data = get_guild_data(data, interaction.guild_id)
         panel_id = str(int(time.time() * 1000))
