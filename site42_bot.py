@@ -32,12 +32,12 @@ DATA_FILE = "bot_data.json"
 BLUE = discord.Colour(0x2563EB)
 RED = discord.Colour(0xDC2626)
 BLACK = discord.Colour(0x000000)
-EMBED_COLOR = BLUE
+EMBED_COLOR = BLACK
 
 # Remplace chaque valeur par TON emoji personnalisé.
 # Format statique : <:nom:ID> | animé : <a:nom:ID>
 EMOJIS = {
-    "success": "EMOJI_SUCCES",
+    "success": "<:EMOJI_SUCCESS:123456789012345678>",
     "error": "EMOJI_ERREUR",
     "warning": "EMOJI_AVERTISSEMENT",
     "info": "EMOJI_INFO",
@@ -181,7 +181,7 @@ def make_embed(title: str, description: Optional[str] = None,
     return discord.Embed(
         title=f"{em(emoji)} {title}",
         description=description,
-        color=color or (RED if emoji in {"error", "warning", "ticket_close"} else EMBED_COLOR),
+        color=BLACK,  # Bande latérale noire pour tous les embeds, sans exception.
     )
 
 def parse_duration(value: str) -> Optional[int]:
@@ -370,7 +370,7 @@ async def warn_cmd(ctx, membre: discord.Member, *, raison="Aucune raison précis
     })
     save_data(data)
     await send_dm(membre, "Avertissement reçu", f"Serveur : {ctx.guild.name}\nRaison : {raison}")
-    await ctx.send(f"{membre.id} a été warn avec succès")
+    await ctx.send(f"{em('success')} {membre.id} a été warn avec succès")
     await log_action(ctx.guild, "Avertissement", f"{membre.mention} — {raison} — par {ctx.author.mention}")
 
 @bot.command(name="sanction", aliases=["sanctions"])
@@ -416,13 +416,13 @@ async def tempmute_cmd(ctx, membre: discord.Member, duree: str, *, raison="Aucun
     })
     save_data(data)
     await send_dm(membre, "Timeout appliqué", f"Durée : {duree}\nRaison : {raison}")
-    await ctx.send(f"{membre.id} a été tempmute avec succès")
+    await ctx.send(f"{em('success')} {membre.id} a été tempmute avec succès")
 
 @bot.command(name="mute")
 async def mute_cmd(ctx, membre: discord.Member, *, raison="Aucune raison précisée"):
     if not await staff_check(ctx, "mute"): return
     await membre.timeout(discord.utils.utcnow() + datetime.timedelta(days=28), reason=raison)
-    await ctx.send(f"{membre.id} a été mute avec succès")
+    await ctx.send(f"{em('success')} {membre.id} a été mute avec succès")
 
 @bot.command(name="unmute")
 async def unmute_cmd(ctx, membre: discord.Member):
@@ -435,7 +435,7 @@ async def ban_cmd(ctx, membre: discord.Member, *, raison="Aucune raison précis�
     if not await staff_check(ctx, "ban"): return
     await send_dm(membre, "Bannissement", f"Serveur : {ctx.guild.name}\nRaison : {raison}")
     await membre.ban(reason=raison)
-    await ctx.send(f"{membre.id} a été ban avec succès")
+    await ctx.send(f"{em('success')} {membre.id} a été ban avec succès")
     await log_action(ctx.guild, "Bannissement", f"{membre} — {raison}")
 
 @bot.command(name="tempban")
@@ -451,20 +451,20 @@ async def tempban_cmd(ctx, membre: discord.Member, duree: str, *, raison="Aucune
     save_data(data)
     await send_dm(membre, "Bannissement temporaire", f"Durée : {duree}\nRaison : {raison}")
     await membre.ban(reason=raison)
-    await ctx.send(f"{membre.id} a été tempban avec succès")
+    await ctx.send(f"{em('success')} {membre.id} a été tempban avec succès")
 
 @bot.command(name="unban")
 async def unban_cmd(ctx, user_id: int, *, raison="Levée du bannissement"):
     if not await staff_check(ctx, "unban"): return
     await ctx.guild.unban(discord.Object(id=user_id), reason=raison)
-    await ctx.send(f"{user_id} a été unban avec succès")
+    await ctx.send(f"{em('success')} {user_id} a été unban avec succès")
 
 @bot.command(name="kick")
 async def kick_cmd(ctx, membre: discord.Member, *, raison="Aucune raison précisée"):
     if not await staff_check(ctx, "kick"): return
     await send_dm(membre, "Expulsion", f"Raison : {raison}")
     await membre.kick(reason=raison)
-    await ctx.send(f"{membre.id} a été kick avec succès")
+    await ctx.send(f"{em('success')} {membre.id} a été kick avec succès")
 
 @bot.command(name="rank")
 async def rank_cmd(ctx, membre: discord.Member, niveau: int):
