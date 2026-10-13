@@ -20,6 +20,8 @@ from typing import Optional
 import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
+from flask import Flask
+from threading import Thread
 
 # ============================================================
 # CONFIGURATION
@@ -38,6 +40,9 @@ EMOJIS = {
     "info": "EMOJI_INFO",
     "moderation": "EMOJI_MODERATION",
     "ticket": "EMOJI_TICKET",
+    "ticket_purchase": "EMOJI_TICKET_ACHAT",
+    "ticket_support": "EMOJI_TICKET_SUPPORT",
+    "ticket_close": "EMOJI_TICKET_FERMER",
     "giveaway": "EMOJI_GIVEAWAY",
     "user": "EMOJI_MEMBRE",
     "role": "EMOJI_ROLE",
@@ -57,6 +62,20 @@ EMOJIS = {
 def em(key: str) -> str:
     """Retourne l'emoji configuré ou un placeholder visible à remplacer."""
     return EMOJIS.get(key, "EMOJI_A_CONFIGURER")
+
+def button_emoji(key: str):
+    """Convertit un emoji Discord personnalisé configuré, sinon n'en affiche aucun.
+
+    Remplace les placeholders EMOJI_... par une mention comme <:nom:123456789012345678>
+    ou <a:nom:123456789012345678>. Les placeholders ne sont pas envoyés à Discord.
+    """
+    value = EMOJIS.get(key, "")
+    if not isinstance(value, str) or not re.fullmatch(r"<a?:[A-Za-z0-9_]+:\d+>", value):
+        return None
+    try:
+        return discord.PartialEmoji.from_str(value)
+    except (TypeError, ValueError):
+        return None
 
 
 # Mets ici les IDs des rôles qui correspondent aux niveaux du staff.
@@ -104,6 +123,7 @@ DEFAULT_DATA = {
     "bot_name": None,
     "bot_avatar": None,
     "bot_status": "online",
+    "guilds": {},
 }
 
 def load_data():
@@ -127,6 +147,20 @@ def save_data(data):
         json.dump(data, file, indent=2, ensure_ascii=False)
     os.replace(temp_path, DATA_FILE)
 
+def get_guild_data(data, guild_id):
+    """Retourne un espace de configuration isolé pour un serveur."""
+    data.setdefault("guilds", {})
+    return data["guilds"].setdefault(str(guild_id), {
+        "ticket_panels": {}, "tickets": {}, "giveaways": {}, "logs_channel": 0,
+        "join_message": "Bienvenue {user} sur {server}.",
+        "leave_message": "{user} a quitté {server}.", "owner_role_id": 0,
+    })
+
+
+def can_configure(member):
+    return isinstance(member, discord.Member) and (member.guild_permissions.administrator or member.guild_permissions.manage_guild)
+
+
 def edit_data(callback):
     data = load_data()
     callback(data)
@@ -140,14 +174,12 @@ def edit_data(callback):
 
 def make_embed(title: str, description: Optional[str] = None,
                emoji: str = "info", color: Optional[discord.Colour] = None):
-    embed = discord.Embed(
+    # Embeds sans signature Site42 ni date/heure automatique.
+    return discord.Embed(
         title=f"{em(emoji)} {title}",
         description=description,
         color=color or EMBED_COLOR,
-        timestamp=discord.utils.utcnow(),
     )
-    embed.set_footer(text="Site42")
-    return embed
 
 def parse_duration(value: str) -> Optional[int]:
     match = re.fullmatch(r"\s*(\d+)\s*([smhdj])\s*", value.lower())
@@ -190,7 +222,8 @@ async def reply_embed(ctx, title, description=None, emoji="info",
 
 async def log_action(guild: discord.Guild, title: str, description: str):
     data = load_data()
-    channel_id = data.get("logs_channel") or LOG_CHANNEL_ID
+    gd = get_guild_data(data, guild.id)
+    channel_id = gd.get("logs_channel") or data.get("logs_channel") or LOG_CHANNEL_ID
     channel = guild.get_channel(int(channel_id)) if channel_id else None
     if channel:
         try:
@@ -210,7 +243,7 @@ async def staff_check(ctx, command_name):
 
 async def send_dm(member: discord.Member, title: str, description: str):
     try:
-        await member.send(embed=make_embed(title, description, "moderation"))
+        await member.send(f"**{title}**\n{description}")
     except discord.Forbidden:
         pass
 
@@ -225,13 +258,6 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
-
-
-@bot.event
-async def on_ready():
-    print(f"Site42 connecté : {bot.user} | préfixe {PREFIX}")
-    if not giveaway_watcher.is_running():
-        giveaway_watcher.start()
 
 
 @bot.event
@@ -318,7 +344,8 @@ async def stats_logs(ctx):
 @commands.has_permissions(administrator=True)
 async def logs_global(ctx):
     data = load_data()
-    data["logs_channel"] = ctx.channel.id
+    gd = get_guild_data(data, ctx.guild.id)
+    gd["logs_channel"] = ctx.channel.id
     save_data(data)
     await reply_embed(ctx, "Logs configurés",
                       f"Les logs seront envoyés dans {ctx.channel.mention}.", "success")
@@ -553,149 +580,316 @@ async def scan_cmd(ctx, membre: Optional[discord.Member] = None):
 
 
 # ============================================================
-# TICKETS AVEC BOUTONS
+# TICKETS MULTI-PANELS CONFIGURABLES
 # ============================================================
 
-class TicketPanelView(discord.ui.LayoutView):
-    """Panneau de tickets en Components V2 : texte et boutons dans le même conteneur."""
-    def __init__(self):
+# Les données des tickets sont séparées par serveur dans ticket_panels.
+# Chaque panel possède ses options, ses rôles, son salon de publication
+# et ses catégories Discord de destination.
+
+class TicketOptionModal(discord.ui.Modal, title="Ajouter une option de ticket"):
+    option_name = discord.ui.TextInput(label="Nom de l'option", placeholder="Ex. Direction", max_length=45)
+    option_description = discord.ui.TextInput(label="Description", placeholder="Décris brièvement cette demande", max_length=180, required=False)
+
+    def __init__(self, setup_view):
+        super().__init__(timeout=300)
+        self.setup_view = setup_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        self.setup_view.pending_option = {
+            "name": str(self.option_name).strip(),
+            "description": str(self.option_description).strip(),
+            "role_ids": [],
+        }
+        await interaction.response.send_message(
+            "Choisis maintenant les rôles autorisés pour cette option. Tu peux sélectionner plusieurs rôles.",
+            view=TicketRolePickView(self.setup_view), ephemeral=True)
+
+
+class TicketRolePickView(discord.ui.View):
+    def __init__(self, setup_view):
+        super().__init__(timeout=300)
+        self.setup_view = setup_view
+        self.add_item(discord.ui.RoleSelect(placeholder="Rôles autorisés", min_values=1, max_values=25, custom_id="site42_setup_role_select"))
+        self.children[0].callback = self.roles_selected
+
+    async def roles_selected(self, interaction: discord.Interaction):
+        select = self.children[0]
+        self.setup_view.pending_option["role_ids"] = [role.id for role in select.values]
+        self.setup_view.options.append(self.setup_view.pending_option)
+        self.setup_view.pending_option = None
+        await interaction.response.send_message(
+            f"Option ajoutée : **{self.setup_view.options[-1]['name']}**. Ajoute d'autres options ou choisis le salon de publication.",
+            view=self.setup_view, ephemeral=True)
+
+
+class TicketSetupView(discord.ui.View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=900)
+        self.guild_id = guild_id
+        self.mode = "buttons"
+        self.options = []
+        self.pending_option = None
+        self.publish_channel_id = None
+        self.panel_title = "Centre de support"
+        self.panel_description = "Choisis une catégorie ci-dessous pour ouvrir un ticket privé."
+
+    @discord.ui.button(label="Boutons", style=discord.ButtonStyle.secondary, row=0)
+    async def choose_buttons(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.mode = "buttons"
+        await interaction.response.send_message("Format choisi : boutons.", ephemeral=True)
+
+    @discord.ui.button(label="Menu déroulant", style=discord.ButtonStyle.secondary, row=0)
+    async def choose_dropdown(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.mode = "select"
+        await interaction.response.send_message("Format choisi : menu déroulant.", ephemeral=True)
+
+    @discord.ui.button(label="Ajouter une option", style=discord.ButtonStyle.primary, row=1)
+    async def add_option(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if len(self.options) >= 25:
+            return await interaction.response.send_message("La limite Discord est de 25 options par menu.", ephemeral=True)
+        await interaction.response.send_modal(TicketOptionModal(self))
+
+    @discord.ui.button(label="Choisir le salon et publier", style=discord.ButtonStyle.success, row=1)
+    async def publish(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.options:
+            return await interaction.response.send_message("Ajoute au moins une option avant de publier.", ephemeral=True)
+        await interaction.response.send_message("Dans quel salon publier le panel ?", view=TicketPublishChannelView(self), ephemeral=True)
+
+
+class TicketPublishChannelView(discord.ui.View):
+    def __init__(self, setup_view):
+        super().__init__(timeout=300)
+        self.setup_view = setup_view
+        self.add_item(discord.ui.ChannelSelect(channel_types=[discord.ChannelType.text], placeholder="Salon de publication", min_values=1, max_values=1))
+        self.children[0].callback = self.channel_selected
+
+    async def channel_selected(self, interaction: discord.Interaction):
+        channel = self.children[0].values[0]
+        if not isinstance(channel, discord.TextChannel):
+            return await interaction.response.send_message("Choisis un salon textuel.", ephemeral=True)
+        data = load_data()
+        guild_data = get_guild_data(data, interaction.guild_id)
+        panel_id = str(int(time.time() * 1000))
+        panel = {
+            "id": panel_id, "mode": self.setup_view.mode,
+            "title": self.setup_view.panel_title,
+            "description": self.setup_view.panel_description,
+            "options": self.setup_view.options,
+            "publish_channel_id": channel.id,
+        }
+        guild_data.setdefault("ticket_panels", {})[panel_id] = panel
+        save_data(data)
+        view = DynamicTicketPanelView(panel)
+        embed = make_embed(panel["title"], panel["description"], "ticket")
+        for opt in panel["options"]:
+            roles = ", ".join(f"<@&{rid}>" for rid in opt["role_ids"]) or "Aucun rôle dédié"
+            embed.add_field(name=opt["name"], value=(opt.get("description") or "Ouvre un ticket") + f"\n**Rôles :** {roles}", inline=False)
+        try:
+            message = await channel.send(embed=embed, view=view)
+        except discord.Forbidden:
+            return await interaction.response.send_message("Je n'ai pas la permission d'envoyer le panel dans ce salon.", ephemeral=True)
+        panel["message_id"] = message.id
+        save_data(data)
+        await interaction.response.send_message(f"Panel publié dans {channel.mention} avec {len(panel['options'])} option(s).", ephemeral=True)
+
+
+class DynamicTicketPanelView(discord.ui.View):
+    def __init__(self, panel):
         super().__init__(timeout=None)
+        self.panel = panel
+        if panel.get("mode") == "select":
+            options = [discord.SelectOption(label=o["name"][:100], description=(o.get("description") or "Ouvrir un ticket")[:100], value=str(i)) for i, o in enumerate(panel["options"][:25])]
+            select = discord.ui.Select(placeholder="Choisis le type de ticket", options=options, custom_id=f"s42:ticket:select:{panel['id']}")
+            select.callback = self.select_callback
+            self.add_item(select)
+        else:
+            for index, option in enumerate(panel["options"][:25]):
+                button = discord.ui.Button(label=option["name"][:80], style=discord.ButtonStyle.secondary, custom_id=f"s42:ticket:button:{panel['id']}:{index}")
+                async def callback(interaction, index=index):
+                    await self.create_ticket(interaction, index)
+                button.callback = callback
+                self.add_item(button)
 
-        container = discord.ui.Container(
-            discord.ui.TextDisplay("## Support Ticket"),
-            discord.ui.TextDisplay(
-                "• *Pour toute demande concernant :*\\n"
-                "  ◦ Des questions sur les tarifs ou un achat de bot\\n"
-                "  ◦ Des problèmes techniques liés à un bot\\n\\n"
-                "Choisis le bouton correspondant ci-dessous pour ouvrir un ticket privé."
-            ),
-            accent_colour=discord.Colour.blurple()
-        )
+    async def select_callback(self, interaction: discord.Interaction):
+        await self.create_ticket(interaction, int(interaction.data["values"][0]))
 
-        row = discord.ui.ActionRow()
-        purchase = discord.ui.Button(
-            label="Achat de bot",
-            style=discord.ButtonStyle.secondary,
-            custom_id="site42_ticket_purchase"
-        )
-        support = discord.ui.Button(
-            label="Problème Bots",
-            style=discord.ButtonStyle.secondary,
-            custom_id="site42_ticket_support"
-        )
-        purchase.callback = self.purchase_ticket
-        support.callback = self.support_ticket
-        row.add_item(purchase)
-        row.add_item(support)
-        container.add_item(row)
-        self.add_item(container)
-
-    async def _create_ticket(self, interaction: discord.Interaction, category_name: str):
+    async def create_ticket(self, interaction: discord.Interaction, option_index: int):
         guild = interaction.guild
         if guild is None:
-            return await interaction.response.send_message(
-                embed=make_embed("Erreur", "Cette action doit être utilisée sur un serveur.", "error"),
-                ephemeral=True)
-
+            return await interaction.response.send_message("Cette action doit être utilisée sur un serveur.", ephemeral=True)
         data = load_data()
-        existing = data["tickets"].get(str(interaction.user.id))
-        if existing and guild.get_channel(existing):
-            return await interaction.response.send_message(
-                embed=make_embed("Ticket déjà ouvert", f"Ton ticket : <#{existing}>", "warning"),
-                ephemeral=True)
-
-        category = guild.get_channel(TICKET_CATEGORY_ID) if TICKET_CATEGORY_ID else None
+        gd = get_guild_data(data, guild.id)
+        panel = gd.get("ticket_panels", {}).get(str(self.panel["id"]), self.panel)
+        if option_index >= len(panel.get("options", [])):
+            return await interaction.response.send_message("Cette option de ticket n'existe plus.", ephemeral=True)
+        option = panel["options"][option_index]
+        active = gd.setdefault("tickets", {})
+        key = f"{interaction.user.id}:{panel['id']}"
+        previous = active.get(key)
+        if previous and guild.get_channel(int(previous.get("channel_id", 0))):
+            return await interaction.response.send_message(f"Tu as déjà un ticket ouvert : <#{previous['channel_id']}>.", ephemeral=True)
+        safe_user = re.sub(r"[^a-z0-9-]", "", interaction.user.name.lower().replace(" ", "-"))[:35] or "membre"
+        safe_option = re.sub(r"[^a-z0-9-]", "", option["name"].lower().replace(" ", "-"))[:25] or "ticket"
+        category_name = option["name"][:90]
+        category = discord.utils.get(guild.categories, name=category_name)
+        if category is None:
+            category = await guild.create_category(category_name, reason=f"Catégorie de tickets {category_name}")
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
         }
-        if guild.me:
-            overwrites[guild.me] = discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True)
-        if TICKET_STAFF_ROLE_ID:
-            staff_role = guild.get_role(TICKET_STAFF_ROLE_ID)
-            if staff_role:
-                overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-
-        safe_name = re.sub(r"[^a-z0-9-]", "", interaction.user.name.lower().replace(" ", "-"))[:70] or "membre"
+        bot_member = guild.me
+        if bot_member:
+            overwrites[bot_member] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True)
+        for role_id in option.get("role_ids", []):
+            role = guild.get_role(int(role_id))
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        # Le rôle administrateur configuré globalement peut voir tous les tickets.
+        owner_role_id = gd.get("owner_role_id")
+        owner_role = guild.get_role(int(owner_role_id)) if owner_role_id else None
+        if owner_role:
+            overwrites[owner_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
         channel = await guild.create_text_channel(
-            name=f"ticket-{safe_name}",
-            topic=f"Type : {category_name} | Ouvert par {interaction.user} ({interaction.user.id})",
-            category=category if isinstance(category, discord.CategoryChannel) else None,
-            overwrites=overwrites,
-            reason=f"Ticket {category_name} ouvert par {interaction.user}")
-        data["tickets"][str(interaction.user.id)] = channel.id
+            name=f"{safe_option}-{safe_user}"[:95], category=category, overwrites=overwrites,
+            topic=f"site42_ticket|panel={panel['id']}|option={option['name']}|owner={interaction.user.id}",
+            reason=f"Ticket {option['name']} ouvert par {interaction.user}")
+        active[key] = {"channel_id": channel.id, "user_id": interaction.user.id, "panel_id": panel["id"], "option": option["name"], "role_ids": option.get("role_ids", []), "claimed_by": None}
         save_data(data)
-        await channel.send(embed=make_embed(
-            f"Ticket — {category_name}",
-            f"Bonjour {interaction.user.mention}, explique ta demande.\\nLe staff peut utiliser le bouton ci-dessous pour fermer ce ticket.",
-            "ticket"), view=TicketControlView())
-        await interaction.response.send_message(
-            embed=make_embed("Ticket créé", f"Ton ticket {category_name.lower()} est {channel.mention}.", "success"),
-            ephemeral=True)
+        await channel.send(embed=make_embed(f"Ticket — {option['name']}", f"Bonjour {interaction.user.mention}, explique ta demande ici.\n\nUtilise les boutons ci-dessous pour gérer ce ticket.", "ticket"), view=TicketControlView())
+        await interaction.response.send_message(f"Ton ticket a été créé : {channel.mention}.", ephemeral=True)
 
-    async def purchase_ticket(self, interaction: discord.Interaction):
-        await self._create_ticket(interaction, "Achat de bot")
-
-    async def support_ticket(self, interaction: discord.Interaction):
-        await self._create_ticket(interaction, "Problème Bots")
 
 class TicketControlView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Fermer", style=discord.ButtonStyle.danger,
-                       custom_id="site42_ticket_close")
-    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not (interaction.user.guild_permissions.manage_channels or
-                (TICKET_STAFF_ROLE_ID and any(r.id == TICKET_STAFF_ROLE_ID for r in interaction.user.roles))):
-            return await interaction.response.send_message(
-                embed=make_embed("Accès refusé", "Seul le staff peut fermer ce ticket.", "error"),
-                ephemeral=True)
+    def _ticket_record(self, interaction):
         data = load_data()
-        for owner_id, channel_id in list(data["tickets"].items()):
-            if channel_id == interaction.channel.id:
-                del data["tickets"][owner_id]
+        gd = get_guild_data(data, interaction.guild_id)
+        for key, ticket in gd.setdefault("tickets", {}).items():
+            if int(ticket.get("channel_id", 0)) == interaction.channel_id:
+                return data, gd, key, ticket
+        return data, gd, None, None
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.danger, custom_id="s42:ticket:close")
+    async def close_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data, gd, key, ticket = self._ticket_record(interaction)
+        if not ticket:
+            return await interaction.response.send_message("Ce salon n'est pas un ticket suivi.", ephemeral=True)
+        if not can_manage_ticket(interaction.user, ticket):
+            return await interaction.response.send_message("Tu n'as pas la permission de fermer ce ticket.", ephemeral=True)
+        await interaction.response.send_message("Ticket fermé. Le salon va être supprimé.")
+        await log_action(interaction.guild, "Ticket fermé", f"Salon : {interaction.channel.mention}\nOption : {ticket['option']}\nFermé par : {interaction.user.mention}")
+        gd["tickets"].pop(key, None)
         save_data(data)
-        await interaction.response.send_message(embed=make_embed("Ticket fermé", "Ce salon sera supprimé dans quelques secondes.", "ticket"))
         await interaction.channel.delete(reason=f"Ticket fermé par {interaction.user}")
 
+    @discord.ui.button(label="Claim", style=discord.ButtonStyle.primary, custom_id="s42:ticket:claim")
+    async def claim_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data, gd, key, ticket = self._ticket_record(interaction)
+        if not ticket:
+            return await interaction.response.send_message("Ce salon n'est pas un ticket suivi.", ephemeral=True)
+        if not can_manage_ticket(interaction.user, ticket):
+            return await interaction.response.send_message("Seuls les rôles autorisés peuvent claim ce ticket.", ephemeral=True)
+        if ticket.get("claimed_by") and ticket["claimed_by"] != interaction.user.id:
+            return await interaction.response.send_message(f"Ce ticket est déjà claim par <@{ticket['claimed_by']}>.", ephemeral=True)
+        ticket["claimed_by"] = interaction.user.id
+        save_data(data)
+        # Les rôles configurés pour cette option constituent la liste autorisée (WL).
+        # Le membre qui claim est explicitement autorisé à écrire dans le ticket.
+        if isinstance(interaction.user, discord.Member):
+            await interaction.channel.set_permissions(interaction.user, view_channel=True, send_messages=True, read_message_history=True)
+        await interaction.response.send_message(f"Ticket pris en charge par {interaction.user.mention}. Seuls l'auteur, la personne assignée et les personnes autorisées (WL) peuvent écrire.")
+
+    @discord.ui.button(label="Rename", style=discord.ButtonStyle.secondary, custom_id="s42:ticket:rename")
+    async def rename_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data, gd, key, ticket = self._ticket_record(interaction)
+        if not ticket or not can_manage_ticket(interaction.user, ticket):
+            return await interaction.response.send_message("Tu n'as pas la permission de renommer ce ticket.", ephemeral=True)
+        await interaction.response.send_modal(TicketRenameModal())
+
+
+class TicketRenameModal(discord.ui.Modal, title="Renommer le ticket"):
+    new_name = discord.ui.TextInput(label="Nouveau nom", max_length=90)
+    async def on_submit(self, interaction: discord.Interaction):
+        name = re.sub(r"[^a-z0-9-]", "-", str(self.new_name).lower().replace(" ", "-"))[:90].strip("-") or "ticket"
+        await interaction.channel.edit(name=name, reason=f"Ticket renommé par {interaction.user}")
+        await interaction.response.send_message(f"Ticket renommé en **{name}**.", ephemeral=True)
+
+
+def can_manage_ticket(member, ticket):
+    if not isinstance(member, discord.Member):
+        return False
+    if member.guild_permissions.administrator or member.guild_permissions.manage_channels:
+        return True
+    allowed = set(int(x) for x in ticket.get("role_ids", []))
+    return any(role.id in allowed for role in member.roles)
+
+
 @bot.command(name="ticket")
+@commands.has_permissions(manage_guild=True)
 async def ticket_cmd(ctx):
-    # Components V2 : le panneau et ses boutons sont contenus dans le même cadre.
-    await ctx.send(view=TicketPanelView())
+    await ctx.send(embed=make_embed("Configuration des tickets", "Choisis le format, ajoute les options, sélectionne les rôles autorisés et publie le panel dans le salon souhaité.", "ticket"), view=TicketSetupView(ctx.guild.id))
+
 
 @bot.command(name="add")
 async def ticket_add(ctx, membre: discord.Member):
-    if not ctx.channel.name.startswith("ticket-"):
-        return await reply_embed(ctx, "Commande indisponible", "Utilise cette commande dans un ticket.", "warning")
+    data = load_data(); gd = get_guild_data(data, ctx.guild.id)
+    ticket = next((t for t in gd.setdefault("tickets", {}).values() if int(t.get("channel_id", 0)) == ctx.channel.id), None)
+    if not ticket:
+        return await ctx.send("Cette commande doit être utilisée dans un ticket.")
+    if not can_manage_ticket(ctx.author, ticket):
+        return await ctx.send("Tu n'as pas la permission de gérer ce ticket.")
     await ctx.channel.set_permissions(membre, view_channel=True, send_messages=True, read_message_history=True)
-    await reply_embed(ctx, "Membre ajouté", f"{membre.mention} peut maintenant voir ce ticket.", "success")
+    await ctx.send(f"{membre.mention} a été ajouté au ticket avec succès.")
+
 
 @bot.command(name="del")
 async def ticket_del(ctx, membre: discord.Member):
-    if not ctx.channel.name.startswith("ticket-"):
-        return await reply_embed(ctx, "Commande indisponible", "Utilise cette commande dans un ticket.", "warning")
+    data = load_data(); gd = get_guild_data(data, ctx.guild.id)
+    ticket = next((t for t in gd.setdefault("tickets", {}).values() if int(t.get("channel_id", 0)) == ctx.channel.id), None)
+    if not ticket:
+        return await ctx.send("Cette commande doit être utilisée dans un ticket.")
+    if not can_manage_ticket(ctx.author, ticket):
+        return await ctx.send("Tu n'as pas la permission de gérer ce ticket.")
     await ctx.channel.set_permissions(membre, overwrite=None)
-    await reply_embed(ctx, "Membre retiré", f"{membre.mention} ne voit plus ce ticket.", "success")
+    await ctx.send(f"{membre.mention} a été retiré du ticket avec succès.")
+
 
 @bot.command(name="close")
 async def ticket_close_cmd(ctx):
-    if not ctx.channel.name.startswith("ticket-"):
-        return await reply_embed(ctx, "Commande indisponible", "Utilise cette commande dans un ticket.", "warning")
-    await reply_embed(ctx, "Ticket fermé", "Le salon va être supprimé.", "ticket")
+    data = load_data(); gd = get_guild_data(data, ctx.guild.id)
+    found = next(((key, t) for key, t in gd.setdefault("tickets", {}).items() if int(t.get("channel_id", 0)) == ctx.channel.id), None)
+    if not found:
+        return await ctx.send("Cette commande doit être utilisée dans un ticket.")
+    key, ticket = found
+    if not can_manage_ticket(ctx.author, ticket):
+        return await ctx.send("Tu n'as pas la permission de fermer ce ticket.")
+    await log_action(ctx.guild, "Ticket fermé", f"Salon : #{ctx.channel.name}\nOption : {ticket['option']}\nFermé par : {ctx.author.mention}")
+    gd["tickets"].pop(key, None); save_data(data)
+    await ctx.send("Ticket fermé. Le salon va être supprimé.")
     await ctx.channel.delete(reason=f"Ticket fermé par {ctx.author}")
+
 
 @bot.command(name="rename")
 async def ticket_rename(ctx, *, nom: str):
-    if not ctx.channel.name.startswith("ticket-"):
-        return await reply_embed(ctx, "Commande indisponible", "Utilise cette commande dans un ticket.", "warning")
-    await ctx.channel.edit(name=re.sub(r"[^a-z0-9-]", "-", nom.lower())[:90])
-    await reply_embed(ctx, "Ticket renommé", f"Nouveau nom : **{nom}**", "success")
+    data = load_data(); gd = get_guild_data(data, ctx.guild.id)
+    ticket = next((t for t in gd.setdefault("tickets", {}).values() if int(t.get("channel_id", 0)) == ctx.channel.id), None)
+    if not ticket:
+        return await ctx.send("Cette commande doit être utilisée dans un ticket.")
+    if not can_manage_ticket(ctx.author, ticket):
+        return await ctx.send("Tu n'as pas la permission de gérer ce ticket.")
+    name = re.sub(r"[^a-z0-9-]", "-", nom.lower().replace(" ", "-"))[:90].strip("-") or "ticket"
+    await ctx.channel.edit(name=name)
+    await ctx.send(f"Ticket renommé en **{name}**.")
+
 
 @bot.command(name="ticket-stats")
 async def ticket_stats(ctx):
-    data = load_data()
-    await reply_embed(ctx, "Statistiques tickets", f"Tickets actuellement suivis : **{len(data['tickets'])}**", "stats")
+    data = load_data(); gd = get_guild_data(data, ctx.guild.id)
+    await ctx.send(embed=make_embed("Statistiques tickets", f"Tickets ouverts : **{len(gd.setdefault('tickets', {}))}**\nPanels configurés : **{len(gd.setdefault('ticket_panels', {}))}**", "stats"))
 
 
 # ============================================================
@@ -823,7 +1017,7 @@ async def giveaway_list(ctx):
 @commands.has_permissions(administrator=True)
 async def joinmessage(ctx, *, message: str):
     data = load_data()
-    data["join_message"] = message
+    get_guild_data(data, ctx.guild.id)["join_message"] = message
     save_data(data)
     await reply_embed(ctx, "Message d'arrivée configuré",
                       "Variables disponibles : `{user}` et `{server}`.", "success")
@@ -832,7 +1026,7 @@ async def joinmessage(ctx, *, message: str):
 @commands.has_permissions(administrator=True)
 async def leavemessage(ctx, *, message: str):
     data = load_data()
-    data["leave_message"] = message
+    get_guild_data(data, ctx.guild.id)["leave_message"] = message
     save_data(data)
     await reply_embed(ctx, "Message de départ configuré",
                       "Variables disponibles : `{user}` et `{server}`.", "success")
@@ -840,19 +1034,21 @@ async def leavemessage(ctx, *, message: str):
 @bot.event
 async def on_member_join(member):
     data = load_data()
-    channel_id = data.get("logs_channel") or LOG_CHANNEL_ID
+    gd = get_guild_data(data, member.guild.id)
+    channel_id = gd.get("logs_channel") or data.get("logs_channel") or LOG_CHANNEL_ID
     channel = member.guild.get_channel(int(channel_id)) if channel_id else None
     if channel:
-        text = data["join_message"].format(user=member.mention, server=member.guild.name)
+        text = gd.get("join_message", "Bienvenue {user} sur {server}.").format(user=member.mention, server=member.guild.name)
         await channel.send(embed=make_embed("Arrivée d'un membre", text, "user"))
 
 @bot.event
 async def on_member_remove(member):
     data = load_data()
-    channel_id = data.get("logs_channel") or LOG_CHANNEL_ID
+    gd = get_guild_data(data, member.guild.id)
+    channel_id = gd.get("logs_channel") or data.get("logs_channel") or LOG_CHANNEL_ID
     channel = member.guild.get_channel(int(channel_id)) if channel_id else None
     if channel:
-        text = data["leave_message"].format(user=str(member), server=member.guild.name)
+        text = gd.get("leave_message", "{user} a quitté {server}.").format(user=str(member), server=member.guild.name)
         await channel.send(embed=make_embed("Départ d'un membre", text, "user"))
 
 @bot.command(name="say")
@@ -864,7 +1060,7 @@ async def say_cmd(ctx, *, message: str):
 @bot.command(name="mp")
 @commands.has_permissions(administrator=True)
 async def mp_cmd(ctx, membre: discord.Member, *, message: str):
-    await membre.send(embed=make_embed(f"Message de {ctx.guild.name}", message, "info"))
+    await membre.send(f"Message de {ctx.guild.name}\n\n{message}")
     await reply_embed(ctx, "Message privé envoyé", f"Message envoyé à {membre.mention}.", "success")
 
 @bot.command(name="dmall")
@@ -875,7 +1071,7 @@ async def dmall_cmd(ctx, *, message: str):
         if member.bot:
             continue
         try:
-            await member.send(embed=make_embed(f"Message de {ctx.guild.name}", message, "info"))
+            await member.send(f"Message de {ctx.guild.name}\n\n{message}")
             sent += 1
         except discord.Forbidden:
             pass
@@ -955,10 +1151,14 @@ persistent_views_registered = False
 async def on_ready():
     global persistent_views_registered
     if not persistent_views_registered:
-        bot.add_view(TicketPanelView())
         bot.add_view(TicketControlView())
-        # Réenregistre les boutons de chaque giveaway actif après un redémarrage.
         saved = load_data()
+        for guild_id, gd in saved.get("guilds", {}).items():
+            for panel in gd.get("ticket_panels", {}).values():
+                try:
+                    bot.add_view(DynamicTicketPanelView(panel), message_id=int(panel.get("message_id", 0)) or None)
+                except (ValueError, discord.HTTPException, TypeError):
+                    pass
         for message_id, giveaway in saved.get("giveaways", {}).items():
             if not giveaway.get("ended"):
                 try:
@@ -968,9 +1168,22 @@ async def on_ready():
         persistent_views_registered = True
     print(f"Site42 connecté : {bot.user} (ID: {bot.user.id})")
 
+# Petit endpoint HTTP pour Render Web Service gratuit.
+# Le bot Discord reste le processus principal ; Flask écoute sur le port fourni par Render.
+web_app = Flask(__name__)
+
+@web_app.get("/")
+def health_check():
+    return "Site42 bot is running", 200
+
+def run_web_server():
+    port = int(os.environ.get("PORT", "10000"))
+    web_app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
+
 def main():
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN est absent du fichier .env.")
+    Thread(target=run_web_server, daemon=True).start()
     bot.run(TOKEN)
 
 if __name__ == "__main__":
