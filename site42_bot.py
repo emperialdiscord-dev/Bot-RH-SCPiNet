@@ -626,9 +626,14 @@ class TicketRolePickView(discord.ui.View):
             view=self.setup_view, ephemeral=True)
 
 
-class TicketSetupView(discord.ui.View):
+class TicketSetupViewState:
+    """État du configurateur uniquement : aucun callback discord.ui ici.
+
+    Important : les méthodes décorées par @discord.ui.button deviennent des objets
+    Button sur une instance View. Garder l'état dans une classe simple évite de
+    tenter d'appeler ces objets comme des fonctions.
+    """
     def __init__(self, guild_id: int):
-        super().__init__(timeout=900)
         self.guild_id = guild_id
         self.mode = "buttons"
         self.options = []
@@ -637,34 +642,12 @@ class TicketSetupView(discord.ui.View):
         self.panel_title = "Centre de support"
         self.panel_description = "Choisis une catégorie ci-dessous pour ouvrir un ticket privé."
 
-    @discord.ui.button(label="Boutons", style=discord.ButtonStyle.primary, row=0)
-    async def choose_buttons(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.mode = "buttons"
-        await interaction.response.send_message("Format choisi : boutons.", ephemeral=True)
-
-    @discord.ui.button(label="Menu déroulant", style=discord.ButtonStyle.primary, row=0)
-    async def choose_dropdown(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.mode = "select"
-        await interaction.response.send_message("Format choisi : menu déroulant.", ephemeral=True)
-
-    @discord.ui.button(label="Ajouter une option", style=discord.ButtonStyle.primary, row=1)
-    async def add_option(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if len(self.options) >= 25:
-            return await interaction.response.send_message("La limite Discord est de 25 options par menu.", ephemeral=True)
-        await interaction.response.send_modal(TicketOptionModal(self))
-
-    @discord.ui.button(label="Choisir le salon et publier", style=discord.ButtonStyle.primary, row=1)
-    async def publish(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not self.options:
-            return await interaction.response.send_message("Ajoute au moins une option avant de publier.", ephemeral=True)
-        await interaction.response.send_message("Dans quel salon publier le panel ?", view=TicketPublishChannelView(self), ephemeral=True)
-
 
 class TicketSetupLayoutView(discord.ui.LayoutView):
     """Panneau Components V2 : texte et boutons dans le même conteneur."""
     def __init__(self, guild_id: int):
         super().__init__(timeout=900)
-        self.state = TicketSetupView(guild_id)
+        self.state = TicketSetupViewState(guild_id)
         self.container = discord.ui.Container(
             discord.ui.TextDisplay("## Configuration des tickets\nChoisis le format, ajoute les options, sélectionne les rôles autorisés et publie le panneau dans le salon souhaité."),
             discord.ui.Separator(),
@@ -686,16 +669,22 @@ class TicketSetupLayoutView(discord.ui.LayoutView):
         buttons[3].callback = self.publish
 
     async def choose_buttons(self, interaction: discord.Interaction):
-        await self.state.choose_buttons(interaction, None)
+        self.state.mode = "buttons"
+        await interaction.response.send_message("Format choisi : boutons.", ephemeral=True)
 
     async def choose_dropdown(self, interaction: discord.Interaction):
-        await self.state.choose_dropdown(interaction, None)
+        self.state.mode = "select"
+        await interaction.response.send_message("Format choisi : menu déroulant.", ephemeral=True)
 
     async def add_option(self, interaction: discord.Interaction):
-        await self.state.add_option(interaction, None)
+        if len(self.state.options) >= 25:
+            return await interaction.response.send_message("La limite Discord est de 25 options par menu.", ephemeral=True)
+        await interaction.response.send_modal(TicketOptionModal(self.state))
 
     async def publish(self, interaction: discord.Interaction):
-        await self.state.publish(interaction, None)
+        if not self.state.options:
+            return await interaction.response.send_message("Ajoute au moins une option avant de publier.", ephemeral=True)
+        await interaction.response.send_message("Dans quel salon publier le panel ?", view=TicketPublishChannelView(self.state), ephemeral=True)
 
 
 class TicketPublishChannelView(discord.ui.View):
