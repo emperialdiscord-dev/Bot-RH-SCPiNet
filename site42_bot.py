@@ -370,12 +370,7 @@ async def warn_cmd(ctx, membre: discord.Member, *, raison="Aucune raison précis
     })
     save_data(data)
     await send_dm(membre, "Avertissement reçu", f"Serveur : {ctx.guild.name}\nRaison : {raison}")
-    await ctx.send(
-        f"Avertissement ajouté sur **{ctx.guild.name}**.\n"
-        f"Membre : {membre.mention}\n"
-        f"Modérateur : {ctx.author.mention}\n"
-        f"Raison : {raison}"
-    )
+    await ctx.send(f"{membre.id} a été warn avec succès")
     await log_action(ctx.guild, "Avertissement", f"{membre.mention} — {raison} — par {ctx.author.mention}")
 
 @bot.command(name="sanction", aliases=["sanctions"])
@@ -421,19 +416,13 @@ async def tempmute_cmd(ctx, membre: discord.Member, duree: str, *, raison="Aucun
     })
     save_data(data)
     await send_dm(membre, "Timeout appliqué", f"Durée : {duree}\nRaison : {raison}")
-    await ctx.send(
-        f"Timeout appliqué sur **{ctx.guild.name}**.\n"
-        f"Membre : {membre.mention}\nDurée : {duree}\nRaison : {raison}"
-    )
+    await ctx.send(f"{membre.id} a été tempmute avec succès")
 
 @bot.command(name="mute")
 async def mute_cmd(ctx, membre: discord.Member, *, raison="Aucune raison précisée"):
     if not await staff_check(ctx, "mute"): return
     await membre.timeout(discord.utils.utcnow() + datetime.timedelta(days=28), reason=raison)
-    await ctx.send(
-        f"Membre réduit au silence sur **{ctx.guild.name}**.\n"
-        f"Membre : {membre.mention}\nDurée maximale Discord : 28 jours.\nRaison : {raison}"
-    )
+    await ctx.send(f"{membre.id} a été mute avec succès")
 
 @bot.command(name="unmute")
 async def unmute_cmd(ctx, membre: discord.Member):
@@ -446,7 +435,7 @@ async def ban_cmd(ctx, membre: discord.Member, *, raison="Aucune raison précis�
     if not await staff_check(ctx, "ban"): return
     await send_dm(membre, "Bannissement", f"Serveur : {ctx.guild.name}\nRaison : {raison}")
     await membre.ban(reason=raison)
-    await ctx.send(f"Membre banni de **{ctx.guild.name}** : {membre}\nRaison : {raison}")
+    await ctx.send(f"{membre.id} a été ban avec succès")
     await log_action(ctx.guild, "Bannissement", f"{membre} — {raison}")
 
 @bot.command(name="tempban")
@@ -462,23 +451,20 @@ async def tempban_cmd(ctx, membre: discord.Member, duree: str, *, raison="Aucune
     save_data(data)
     await send_dm(membre, "Bannissement temporaire", f"Durée : {duree}\nRaison : {raison}")
     await membre.ban(reason=raison)
-    await ctx.send(
-        f"Bannissement temporaire de **{ctx.guild.name}** : {membre}\n"
-        f"Durée : {duree}\nRaison : {raison}"
-    )
+    await ctx.send(f"{membre.id} a été tempban avec succès")
 
 @bot.command(name="unban")
 async def unban_cmd(ctx, user_id: int, *, raison="Levée du bannissement"):
     if not await staff_check(ctx, "unban"): return
     await ctx.guild.unban(discord.Object(id=user_id), reason=raison)
-    await ctx.send(f"Bannissement levé sur **{ctx.guild.name}**.\nID : `{user_id}`\nRaison : {raison}")
+    await ctx.send(f"{user_id} a été unban avec succès")
 
 @bot.command(name="kick")
 async def kick_cmd(ctx, membre: discord.Member, *, raison="Aucune raison précisée"):
     if not await staff_check(ctx, "kick"): return
     await send_dm(membre, "Expulsion", f"Raison : {raison}")
     await membre.kick(reason=raison)
-    await ctx.send(f"Membre expulsé de **{ctx.guild.name}** : {membre}\nRaison : {raison}")
+    await ctx.send(f"{membre.id} a été kick avec succès")
 
 @bot.command(name="rank")
 async def rank_cmd(ctx, membre: discord.Member, niveau: int):
@@ -606,36 +592,41 @@ class TicketOptionModal(discord.ui.Modal, title="Ajouter une option de ticket"):
     option_name = discord.ui.TextInput(label="Nom de l'option", placeholder="Ex. Direction", max_length=45)
     option_description = discord.ui.TextInput(label="Description", placeholder="Décris brièvement cette demande", max_length=180, required=False)
 
-    def __init__(self, setup_view):
+    def __init__(self, setup_state, setup_layout_view):
         super().__init__(timeout=300)
-        self.setup_view = setup_view
+        self.setup_state = setup_state
+        self.setup_layout_view = setup_layout_view
 
     async def on_submit(self, interaction: discord.Interaction):
-        self.setup_view.pending_option = {
+        self.setup_state.pending_option = {
             "name": str(self.option_name).strip(),
             "description": str(self.option_description).strip(),
             "role_ids": [],
         }
         await interaction.response.send_message(
             "Choisis maintenant les rôles autorisés pour cette option. Tu peux sélectionner plusieurs rôles.",
-            view=TicketRolePickView(self.setup_view), ephemeral=True)
+            view=TicketRolePickView(self.setup_state, self.setup_layout_view), ephemeral=True)
 
 
 class TicketRolePickView(discord.ui.View):
-    def __init__(self, setup_view):
+    def __init__(self, setup_state, setup_layout_view):
         super().__init__(timeout=300)
-        self.setup_view = setup_view
-        self.add_item(discord.ui.RoleSelect(placeholder="Rôles autorisés", min_values=1, max_values=25, custom_id="s42_setup_role_select"))
+        self.setup_state = setup_state
+        self.setup_layout_view = setup_layout_view
+        self.add_item(discord.ui.RoleSelect(placeholder="Rôles autorisés", min_values=1, max_values=25))
         self.children[0].callback = self.roles_selected
 
     async def roles_selected(self, interaction: discord.Interaction):
-        select = self.children[0]
-        self.setup_view.pending_option["role_ids"] = [role.id for role in select.values]
-        self.setup_view.options.append(self.setup_view.pending_option)
-        self.setup_view.pending_option = None
+        if not self.setup_state.pending_option:
+            return await interaction.response.send_message("Cette option a expiré. Clique à nouveau sur Ajouter une option.", ephemeral=True)
+        selected_roles = self.children[0].values
+        self.setup_state.pending_option["role_ids"] = [role.id for role in selected_roles]
+        self.setup_state.options.append(self.setup_state.pending_option)
+        added_name = self.setup_state.pending_option["name"]
+        self.setup_state.pending_option = None
         await interaction.response.send_message(
-            f"Option ajoutée : **{self.setup_view.options[-1]['name']}**. Ajoute d'autres options ou choisis le salon de publication.",
-            view=self.setup_view, ephemeral=True)
+            f"Option ajoutée : **{added_name}**. Ajoute d'autres options ou choisis le salon de publication.",
+            view=self.setup_layout_view, ephemeral=True)
 
 
 class TicketSetupViewState:
@@ -691,7 +682,7 @@ class TicketSetupLayoutView(discord.ui.LayoutView):
     async def add_option(self, interaction: discord.Interaction):
         if len(self.state.options) >= 25:
             return await interaction.response.send_message("La limite Discord est de 25 options par menu.", ephemeral=True)
-        await interaction.response.send_modal(TicketOptionModal(self.state))
+        await interaction.response.send_modal(TicketOptionModal(self.state, self))
 
     async def publish(self, interaction: discord.Interaction):
         if not self.state.options:
