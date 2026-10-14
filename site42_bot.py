@@ -81,23 +81,36 @@ def button_emoji(key: str):
         return None
 
 
-# Mets ici les IDs des rôles qui correspondent aux niveaux du staff.
-ROLE_LEVELS = {
-    1: 0,
-    2: 0,
-    3: 0,
-    4: 0,
-    5: 0,
-}
+# Les rôles P1 à P8 se configurent dans le serveur avec =rank <niveau> @role.
+# P9 est réservé à l'identifiant OWNER_USER_ID défini dans l'environnement Render.
+ROLE_LEVELS = {level: 0 for level in range(1, 9)}
 
-# Niveaux minimums par commande (administrateurs Discord passent automatiquement).
+# Niveau minimum par commande. Toute commande non listée est P9 par défaut.
 COMMAND_LEVELS = {
-    "warn": 2, "sanction": 2, "tempmute": 2, "mute": 2,
-    "ban": 3, "tempban": 3, "kick": 3, "unban": 3,
-    "add-role": 3, "del-role": 3, "del-sanction": 3,
-    "rank": 4, "derank": 4, "owner": 5,
-    "lock": 2, "unlock": 2, "lockall": 4, "unlockall": 4,
+    # P0 — Membres
+    "help": 0, "pic": 0, "banner": 0, "stats-invite": 0, "stats-logs": 0, "invite": 0,
+    "server-invite": 0,
+    # P1 — Staff : gestion des tickets
+    "add": 1, "del": 1, "close": 1, "rename": 1,
+    # P2 — Staff confirmé
+    "warn": 2, "sanction": 2,
+    # P3 — Modération
+    "tempmute": 3, "staff-list": 3,
+    # P4 — Admin
+    "mutelist": 4, "mute-list": 4,
+    # P5 — Admin supérieur
+    "mute": 5, "unmute": 5,
+    # P6 — Management
+    "kick": 6, "adminlist": 6, "admin-list": 6, "rank": 6,
+    # P7 — Gestion
+    "tempban": 7, "unban": 7, "derank": 7, "del-sanction": 7,
+    "lock": 7, "unlock": 7, "banlist": 7, "lockall": 7, "unlockall": 7,
+    # P8 — Direction
+    "ban": 8, "wl": 8, "giveaway": 8, "gcancel": 8, "gend": 8,
+    "reroll": 8, "glist": 8,
 }
+P0_COMMANDS = {name for name, level in COMMAND_LEVELS.items() if level == 0}
+OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "0") or 0)
 
 # IDs facultatifs à configurer.
 LOG_CHANNEL_ID = 0
@@ -203,14 +216,28 @@ def format_duration(seconds: float) -> str:
     return " ".join(pieces)
 
 def staff_level(member: discord.Member) -> int:
-    if member.guild_permissions.administrator:
-        return 999
-    ids = {role.id for role in member.roles}
-    return max((level for level, role_id in ROLE_LEVELS.items()
-                if role_id and role_id in ids), default=0)
+    if OWNER_USER_ID and member.id == OWNER_USER_ID:
+        return 9
+    if not isinstance(member, discord.Member):
+        return 0
+    data = load_data()
+    gd = get_guild_data(data, member.guild.id)
+    configured = gd.get("permission_roles", {})
+    ids_by_level = {int(level): int(role_id) for level, role_id in configured.items()
+                    if str(level).isdigit() and str(role_id).isdigit() and int(role_id) > 0}
+    ids_by_level.update({level: role_id for level, role_id in ROLE_LEVELS.items() if role_id})
+    member_role_ids = {role.id for role in member.roles}
+    return max((level for level, role_id in ids_by_level.items()
+                if role_id in member_role_ids), default=0)
+
+def required_level(command_name: str) -> int:
+    return COMMAND_LEVELS.get(command_name, 9)
 
 def has_level(member: discord.Member, command_name: str) -> bool:
-    return staff_level(member) >= COMMAND_LEVELS.get(command_name, 1)
+    needed = required_level(command_name)
+    if needed == 9:
+        return bool(OWNER_USER_ID and member.id == OWNER_USER_ID)
+    return staff_level(member) >= needed
 
 async def reply_embed(ctx, title, description=None, emoji="info",
                       ephemeral=False, color=None):
@@ -240,7 +267,7 @@ async def staff_check(ctx, command_name):
     if has_level(ctx.author, command_name):
         return True
     await reply_embed(ctx, "Permission insuffisante",
-                      f"Niveau requis : **{COMMAND_LEVELS.get(command_name, 1)}**.\n"
+                      f"Niveau requis : **P{required_level(command_name)}**.\n"
                       f"Ton niveau : **{staff_level(ctx.author)}**.", "error")
     return False
 
@@ -275,6 +302,13 @@ async def on_command_error(ctx, error):
         await reply_embed(ctx, "Permission Discord manquante",
                           "Tu n'as pas la permission Discord nécessaire.", "error")
         return
+    if isinstance(error, commands.CheckFailure):
+        message = str(getattr(error, "original", error))
+        try:
+            await ctx.send(message or "Tu n'as pas le niveau de permission requis.")
+        except discord.HTTPException:
+            pass
+        return
     if isinstance(error, commands.BadArgument):
         await reply_embed(ctx, "Argument invalide",
                           "Vérifie les membres, rôles, salons et durées fournis.", "error")
@@ -290,6 +324,20 @@ async def on_command_error(ctx, error):
 @bot.check
 async def guild_only_check(ctx):
     return ctx.guild is not None
+
+
+@bot.check
+async def permission_level_check(ctx):
+    # Les commandes inconnues du tableau sont P9 par défaut.
+    if ctx.command is None:
+        return False
+    if has_level(ctx.author, ctx.command.name):
+        return True
+    needed = required_level(ctx.command.name)
+    current = staff_level(ctx.author) if isinstance(ctx.author, discord.Member) else 0
+    raise commands.CheckFailure(
+        f"Niveau insuffisant : cette commande exige P{needed}; ton niveau est P{current}."
+    )
 
 
 # ============================================================
@@ -335,7 +383,7 @@ async def banner_cmd(ctx, membre: Optional[discord.User] = None):
     embed.set_image(url=user.banner.url)
     await ctx.send(embed=embed)
 
-@bot.command(name="stats-logs")
+@bot.command(name="stats-logs", aliases=["stats-invite"])
 async def stats_logs(ctx):
     data = load_data()
     await reply_embed(ctx, "Statistiques des logs",
@@ -344,7 +392,6 @@ async def stats_logs(ctx):
                       f"Giveaways suivis : **{len(data['giveaways'])}**", "stats")
 
 @bot.command(name="logs-global")
-@commands.has_permissions(administrator=True)
 async def logs_global(ctx):
     data = load_data()
     gd = get_guild_data(data, ctx.guild.id)
@@ -467,25 +514,28 @@ async def kick_cmd(ctx, membre: discord.Member, *, raison="Aucune raison précis
     await ctx.send(f"{em('success')} {membre.id} a été kick avec succès")
 
 @bot.command(name="rank")
-async def rank_cmd(ctx, membre: discord.Member, niveau: int):
+async def rank_cmd(ctx, niveau: int, role: discord.Role):
     if not await staff_check(ctx, "rank"): return
-    if niveau not in ROLE_LEVELS or not ROLE_LEVELS[niveau]:
-        return await reply_embed(ctx, "Niveau non configuré", "Configure les IDs dans ROLE_LEVELS.", "error")
-    role = ctx.guild.get_role(ROLE_LEVELS[niveau])
-    if not role:
-        return await reply_embed(ctx, "Rôle introuvable", "Vérifie ROLE_LEVELS.", "error")
-    await membre.add_roles(role)
-    await reply_embed(ctx, "Niveau attribué", f"{role.mention} ajouté à {membre.mention}.", "success")
+    if niveau < 1 or niveau > 8:
+        return await ctx.send("Utilisation : `=rank <1-8> @role`. P9 est réservé au propriétaire configuré.")
+    data = load_data()
+    gd = get_guild_data(data, ctx.guild.id)
+    gd.setdefault("permission_roles", {})[str(niveau)] = role.id
+    save_data(data)
+    await ctx.send(f"Le rôle {role.mention} correspond maintenant au niveau P{niveau}. Les niveaux supérieurs héritent des permissions inférieures.")
 
 @bot.command(name="derank")
 async def derank_cmd(ctx, membre: discord.Member, niveau: int):
     if not await staff_check(ctx, "derank"): return
-    role_id = ROLE_LEVELS.get(niveau)
+    data = load_data()
+    gd = get_guild_data(data, ctx.guild.id)
+    configured = gd.get("permission_roles", {})
+    role_id = int(configured.get(str(niveau), ROLE_LEVELS.get(niveau, 0)) or 0)
     role = ctx.guild.get_role(role_id) if role_id else None
     if not role:
-        return await reply_embed(ctx, "Rôle introuvable", "Configure ROLE_LEVELS.", "error")
-    await membre.remove_roles(role)
-    await reply_embed(ctx, "Niveau retiré", f"{role.mention} retiré à {membre.mention}.", "success")
+        return await reply_embed(ctx, "Rôle introuvable", f"Aucun rôle n'est configuré pour P{niveau}. Utilise `=rank {niveau} @role`.", "error")
+    await membre.remove_roles(role, reason=f"Retrait du niveau P{niveau} par {ctx.author}")
+    await ctx.send(f"Le rôle {role.mention} (P{niveau}) a été retiré à {membre.mention}.")
 
 @bot.command(name="add-role")
 async def add_role_cmd(ctx, membre: discord.Member, role: discord.Role):
@@ -882,7 +932,6 @@ def can_manage_ticket(member, ticket):
 
 
 @bot.command(name="ticket")
-@commands.has_permissions(manage_guild=True)
 async def ticket_cmd(ctx):
     await ctx.send(view=TicketSetupLayoutView(ctx.guild.id))
 
@@ -974,7 +1023,7 @@ class GiveawayJoinView(discord.ui.View):
 
 @bot.command(name="giveaway")
 async def giveaway_cmd(ctx, duree: str, gagnants: int, *, lot: str):
-    if not await staff_check(ctx, "rank"): return
+    if not await staff_check(ctx, "giveaway"): return
     seconds = parse_duration(duree)
     if seconds is None or seconds < 10 or gagnants < 1:
         return await reply_embed(ctx, "Paramètres invalides",
@@ -1021,7 +1070,7 @@ async def giveaway_watcher():
 
 @bot.command(name="gcancel")
 async def giveaway_cancel(ctx, message_id: int):
-    if not await staff_check(ctx, "rank"): return
+    if not await staff_check(ctx, "gcancel"): return
     data = load_data()
     giveaway = data["giveaways"].get(str(message_id))
     if not giveaway or giveaway.get("ended"):
@@ -1032,7 +1081,7 @@ async def giveaway_cancel(ctx, message_id: int):
 
 @bot.command(name="gend")
 async def giveaway_end(ctx, message_id: int):
-    if not await staff_check(ctx, "rank"): return
+    if not await staff_check(ctx, "gend"): return
     data = load_data()
     giveaway = data["giveaways"].get(str(message_id))
     if not giveaway:
@@ -1044,7 +1093,7 @@ async def giveaway_end(ctx, message_id: int):
 
 @bot.command(name="reroll")
 async def giveaway_reroll(ctx, message_id: int):
-    if not await staff_check(ctx, "rank"): return
+    if not await staff_check(ctx, "reroll"): return
     giveaway = load_data()["giveaways"].get(str(message_id))
     if not giveaway or not giveaway.get("ended"):
         return await reply_embed(ctx, "Impossible", "Ce giveaway n'est pas terminé.", "error")
@@ -1073,8 +1122,8 @@ class WelcomeMessageModal(discord.ui.Modal):
         super().__init__(title=title, timeout=300)
         self.message_input = discord.ui.TextInput(
             label="Message à envoyer",
-            placeholder="Ex. Bienvenue {user} sur {server} !",
-            default=current[:4000],
+            placeholder="Écris librement le message souhaité. Variables : {user}, {server}",
+            default=current[:2000],
             max_length=2000,
             style=discord.TextStyle.paragraph,
             required=True,
@@ -1177,13 +1226,12 @@ def welcome_panel_embed(guild: discord.Guild, kind: str) -> discord.Embed:
         f"**Salon :** {channel.mention if channel else 'Non configuré'}\n"
         f"**Message :** {message}\n"
         f"**Suppression automatique :** {delay_text}\n\n"
-        "Variables disponibles : `{user}` et `{server}`."
+        "Le contenu du message est libre : écris le texte que tu veux dans « Modifier le message ». Variables : `{user}` (membre) et `{server}` (serveur). Le délai de suppression se règle séparément."
     )
     return embed
 
 
 @bot.command(name="joinmessage")
-@commands.has_permissions(administrator=True)
 async def joinmessage(ctx):
     data = load_data()
     gd = get_guild_data(data, ctx.guild.id)
@@ -1196,7 +1244,6 @@ async def joinmessage(ctx):
 
 
 @bot.command(name="leavemessage")
-@commands.has_permissions(administrator=True)
 async def leavemessage(ctx):
     data = load_data()
     gd = get_guild_data(data, ctx.guild.id)
@@ -1248,19 +1295,16 @@ async def on_member_remove(member):
             pass
 
 @bot.command(name="say")
-@commands.has_permissions(manage_messages=True)
 async def say_cmd(ctx, *, message: str):
     await ctx.message.delete()
     await ctx.send(embed=make_embed("Message", message, "info"))
 
 @bot.command(name="mp")
-@commands.has_permissions(administrator=True)
 async def mp_cmd(ctx, membre: discord.Member, *, message: str):
     await membre.send(f"Message de {ctx.guild.name}\n\n{message}")
     await reply_embed(ctx, "Message privé envoyé", f"Message envoyé à {membre.mention}.", "success")
 
 @bot.command(name="dmall")
-@commands.has_permissions(administrator=True)
 async def dmall_cmd(ctx, *, message: str):
     sent = 0
     for member in ctx.guild.members:
@@ -1274,13 +1318,11 @@ async def dmall_cmd(ctx, *, message: str):
     await reply_embed(ctx, "Envoi terminé", f"Message envoyé à {sent} membre(s).", "success")
 
 @bot.command(name="setname")
-@commands.is_owner()
 async def setname_cmd(ctx, *, nom: str):
     await bot.user.edit(username=nom[:32])
     await reply_embed(ctx, "Nom du bot modifié", f"Nouveau nom : **{nom[:32]}**", "success")
 
 @bot.command(name="setpic")
-@commands.is_owner()
 async def setpic_cmd(ctx, url: str):
     import aiohttp
     async with aiohttp.ClientSession() as session:
@@ -1292,34 +1334,30 @@ async def setpic_cmd(ctx, url: str):
     await reply_embed(ctx, "Avatar du bot modifié", "Modification effectuée.", "success")
 
 @bot.command(name="setbanner")
-@commands.is_owner()
 async def setbanner_cmd(ctx):
     await reply_embed(ctx, "Bannière du bot",
                       "Discord ne permet pas de modifier la bannière du bot via l'API discord.py classique.", "warning")
 
 @bot.command(name="setstatus")
-@commands.is_owner()
 async def setstatus_cmd(ctx, *, texte: str):
     await bot.change_presence(activity=discord.Game(name=texte))
     await reply_embed(ctx, "Statut modifié", texte, "success")
 
 @bot.command(name="online")
-@commands.is_owner()
 async def online_cmd(ctx):
     await bot.change_presence(status=discord.Status.online)
     await reply_embed(ctx, "Statut en ligne", "Le bot est en ligne.", "success")
 
 @bot.command(name="dnd")
-@commands.is_owner()
 async def dnd_cmd(ctx):
     await bot.change_presence(status=discord.Status.dnd)
     await reply_embed(ctx, "Statut Ne pas déranger", "Le bot est en mode Ne pas déranger.", "success")
 
 @bot.command(name="owner")
-@commands.is_owner()
 async def owner_cmd(ctx):
-    app_info = await bot.application_info()
-    await reply_embed(ctx, "Propriétaire du bot", f"Propriétaire : {app_info.owner.mention if hasattr(app_info.owner, 'mention') else app_info.owner}", "user")
+    if not OWNER_USER_ID or ctx.author.id != OWNER_USER_ID:
+        return await ctx.send("Commande réservée à l'identifiant OWNER_USER_ID configuré dans Render.")
+    await ctx.send(f"Tu es le propriétaire P9 configuré : {ctx.author.mention}.")
 
 
 # ============================================================
@@ -1327,7 +1365,6 @@ async def owner_cmd(ctx):
 # ============================================================
 
 @bot.command(name="delperm")
-@commands.has_permissions(administrator=True)
 async def delperm_cmd(ctx, membre: discord.Member, role: discord.Role):
     await membre.remove_roles(role)
     await reply_embed(ctx, "Permission retirée", f"Rôle {role.mention} retiré à {membre.mention}.", "success")
