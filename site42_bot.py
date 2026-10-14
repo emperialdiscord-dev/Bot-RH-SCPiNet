@@ -37,29 +37,29 @@ EMBED_COLOR = BLACK
 # Remplace chaque valeur par TON emoji personnalisé.
 # Format statique : <:nom:ID> | animé : <a:nom:ID>
 EMOJIS = {
-    "success": "<:success:1559889063425613844>",
-    "error": "<:failure:1559889036447842314>",
-    "warning": "<:warning:1559889250693161020>",
-    "info": "<:info:1559889082702766180>",
-    "moderation": "<:moderation:1559889166416879646>",
-    "ticket": "<:ticket:1559889138193403904>",
+    "success": "<:EMOJI_SUCCESS:123456789012345678>",
+    "error": "EMOJI_ERREUR",
+    "warning": "EMOJI_AVERTISSEMENT",
+    "info": "EMOJI_INFO",
+    "moderation": "EMOJI_MODERATION",
+    "ticket": "EMOJI_TICKET",
     "ticket_purchase": "EMOJI_TICKET_ACHAT",
-    "ticket_support": "<:questionk:1559888404471091231>",
-    "ticket_close": "<:close:1559889112176263209>",
-    "giveaway": "<:giveaway:1559888839240323173>",
-    "user": "<:user:1559889195013513286>",
-    "role": "<:role:1559889224092614797>",
-    "channel": "<:channel:1559888467985694741>",
-    "logs": "<:logs:1559888896869793812>",
-    "stats": "<:stats:1559888871456772116>",
-    "lock": "<:locked:1559888803148333116>",
-    "unlock": "<:unlocked:1559888774630998067>",
-    "loading": "<a:308215loading:1559883100710764624>",
-    "arrow": "<:arrow:1559888531751436338>",
-    "crown": "<a:881980whitecrown:1559882921463128094>",
-    "calendar": "<:calendar:1559882613416534097>",
-    "link": "<:link:1559888507571408916>",
-    "bot": "<:bot:1559889473691586740>",
+    "ticket_support": "EMOJI_TICKET_SUPPORT",
+    "ticket_close": "EMOJI_TICKET_FERMER",
+    "giveaway": "EMOJI_GIVEAWAY",
+    "user": "EMOJI_MEMBRE",
+    "role": "EMOJI_ROLE",
+    "channel": "EMOJI_SALON",
+    "logs": "EMOJI_LOGS",
+    "stats": "EMOJI_STATS",
+    "lock": "EMOJI_VERROU",
+    "unlock": "EMOJI_DEVERROU",
+    "loading": "EMOJI_CHARGEMENT",
+    "arrow": "EMOJI_FLECHE",
+    "crown": "EMOJI_COURONNE",
+    "calendar": "EMOJI_CALENDRIER",
+    "link": "EMOJI_LIEN",
+    "bot": "EMOJI_BOT",
 }
 
 def em(key: str) -> str:
@@ -81,9 +81,9 @@ def button_emoji(key: str):
         return None
 
 
-# Les rôles P1 à P8 se configurent dans le serveur avec =rank <niveau> @role.
-# P9 est réservé à l'identifiant OWNER_USER_ID défini dans l'environnement Render.
-ROLE_LEVELS = {level: 0 for level in range(1, 9)}
+# Un rôle peut être associé à chaque niveau P0 à P8 avec =rank <niveau> @role.
+# P9 est réservé à OWNER_USER_ID dans les variables d’environnement Render.
+ROLE_LEVELS = {level: 0 for level in range(0, 9)}
 
 # Niveau minimum par commande. Toute commande non listée est P9 par défaut.
 COMMAND_LEVELS = {
@@ -101,7 +101,7 @@ COMMAND_LEVELS = {
     # P5 — Admin supérieur
     "mute": 5, "unmute": 5,
     # P6 — Management
-    "kick": 6, "adminlist": 6, "admin-list": 6, "rank": 6,
+    "kick": 6, "adminlist": 6, "admin-list": 6, "rank": 6, "rank-clear": 6,
     # P7 — Gestion
     "tempban": 7, "unban": 7, "derank": 7, "del-sanction": 7,
     "lock": 7, "unlock": 7, "banlist": 7, "lockall": 7, "unlockall": 7,
@@ -514,15 +514,41 @@ async def kick_cmd(ctx, membre: discord.Member, *, raison="Aucune raison précis
     await ctx.send(f"{em('success')} {membre.id} a été kick avec succès")
 
 @bot.command(name="rank")
-async def rank_cmd(ctx, niveau: int, role: discord.Role):
-    if not await staff_check(ctx, "rank"): return
-    if niveau < 1 or niveau > 8:
-        return await ctx.send("Utilisation : `=rank <1-8> @role`. P9 est réservé au propriétaire configuré.")
+async def rank_cmd(ctx, niveau: Optional[int] = None, role: Optional[discord.Role] = None):
+    if not await staff_check(ctx, "rank"):
+        return
     data = load_data()
     gd = get_guild_data(data, ctx.guild.id)
-    gd.setdefault("permission_roles", {})[str(niveau)] = role.id
+    configured = gd.setdefault("permission_roles", {})
+
+    # Sans argument, affiche les emplacements de rôles pour tous les niveaux.
+    if niveau is None and role is None:
+        lines = []
+        for lvl in range(0, 9):
+            role_id = int(configured.get(str(lvl), ROLE_LEVELS.get(lvl, 0)) or 0)
+            configured_role = ctx.guild.get_role(role_id) if role_id else None
+            lines.append(f"**P{lvl}** — {configured_role.mention if configured_role else 'Aucun rôle configuré'}")
+        lines.append("**P9** — Propriétaire via `OWNER_USER_ID` dans Render (pas de rôle à configurer).")
+        lines.append("\nPour associer un rôle : `=rank <0-8> @role`. Pour retirer un rôle d’un niveau : `=rank-clear <0-8>`. ")
+        return await ctx.send(embed=make_embed("Configuration des rôles P0–P9", "\n".join(lines), "role"))
+
+    if niveau is None or role is None or niveau < 0 or niveau > 8:
+        return await ctx.send("Utilisation : `=rank <0-8> @role`. P9 est réservé au propriétaire configuré dans Render.")
+    configured[str(niveau)] = role.id
     save_data(data)
-    await ctx.send(f"Le rôle {role.mention} correspond maintenant au niveau P{niveau}. Les niveaux supérieurs héritent des permissions inférieures.")
+    await ctx.send(f"Le rôle {role.mention} est maintenant associé à **P{niveau}**. Les niveaux supérieurs héritent des permissions inférieures. Utilise `=rank` pour voir tous les emplacements.")
+
+@bot.command(name="rank-clear")
+async def rank_clear_cmd(ctx, niveau: int):
+    if not await staff_check(ctx, "rank-clear"):
+        return
+    if niveau < 0 or niveau > 8:
+        return await ctx.send("Utilisation : `=rank-clear <0-8>`. P9 est réservé au propriétaire configuré dans Render.")
+    data = load_data()
+    gd = get_guild_data(data, ctx.guild.id)
+    gd.setdefault("permission_roles", {}).pop(str(niveau), None)
+    save_data(data)
+    await ctx.send(f"Le rôle associé à P{niveau} a été retiré. Utilise `=rank` pour voir la configuration.")
 
 @bot.command(name="derank")
 async def derank_cmd(ctx, membre: discord.Member, niveau: int):
