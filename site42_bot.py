@@ -726,13 +726,10 @@ class TicketPublishChannelView(discord.ui.View):
         }
         guild_data.setdefault("ticket_panels", {})[panel_id] = panel
         save_data(data)
-        view = DynamicTicketPanelView(panel)
-        embed = make_embed(f"{panel['title']} — {interaction.guild.name}", panel["description"], "ticket")
-        for opt in panel["options"]:
-            roles = ", ".join(f"<@&{rid}>" for rid in opt["role_ids"]) or "Aucun rôle dédié"
-            embed.add_field(name=opt["name"], value=(opt.get("description") or "Ouvre un ticket") + f"\n**Rôles :** {roles}", inline=False)
+        view = DynamicTicketPanelView(panel, interaction.guild.name)
         try:
-            message = await channel.send(embed=embed, view=view)
+            # Components V2 : titre, description et menu/boutons dans le même conteneur.
+            message = await channel.send(view=view)
         except discord.Forbidden:
             return await interaction.response.send_message("Je n'ai pas la permission d'envoyer le panel dans ce salon.", ephemeral=True)
         panel["message_id"] = message.id
@@ -740,22 +737,32 @@ class TicketPublishChannelView(discord.ui.View):
         await interaction.response.send_message(f"Panel publié dans {channel.mention} avec {len(panel['options'])} option(s).", ephemeral=True)
 
 
-class DynamicTicketPanelView(discord.ui.View):
-    def __init__(self, panel):
+class DynamicTicketPanelView(discord.ui.LayoutView):
+    """Panel public de tickets en Components V2 : texte et contrôles regroupés."""
+    def __init__(self, panel, server_name=""):
         super().__init__(timeout=None)
         self.panel = panel
+        self.server_name = server_name
+        children = [
+            discord.ui.TextDisplay(f"## {panel['title']} — {server_name}".strip(" —") + f"\n{panel['description']}"),
+            discord.ui.Separator(),
+        ]
         if panel.get("mode") == "select":
             options = [discord.SelectOption(label=o["name"][:100], description=(o.get("description") or "Ouvrir un ticket")[:100], value=str(i)) for i, o in enumerate(panel["options"][:25])]
             select = discord.ui.Select(placeholder="Choisis le type de ticket", options=options, custom_id=f"s42:ticket:select:{panel['id']}")
             select.callback = self.select_callback
-            self.add_item(select)
+            children.append(discord.ui.ActionRow(select))
         else:
+            buttons = []
             for index, option in enumerate(panel["options"][:25]):
                 button = discord.ui.Button(label=option["name"][:80], style=discord.ButtonStyle.primary, custom_id=f"s42:ticket:button:{panel['id']}:{index}")
                 async def callback(interaction, index=index):
                     await self.create_ticket(interaction, index)
                 button.callback = callback
-                self.add_item(button)
+                buttons.append(button)
+            for i in range(0, len(buttons), 5):
+                children.append(discord.ui.ActionRow(*buttons[i:i+5]))
+        self.add_item(discord.ui.Container(*children, accent_colour=discord.Colour(0x000000)))
 
     async def select_callback(self, interaction: discord.Interaction):
         await self.create_ticket(interaction, int(interaction.data["values"][0]))
@@ -1059,43 +1066,186 @@ async def giveaway_list(ctx):
 # MESSAGES / CONFIGURATION
 # ============================================================
 
+class WelcomeMessageModal(discord.ui.Modal):
+    def __init__(self, kind: str, current: str):
+        self.kind = kind
+        title = "Modifier le message d'arrivée" if kind == "join" else "Modifier le message de départ"
+        super().__init__(title=title, timeout=300)
+        self.message_input = discord.ui.TextInput(
+            label="Message à envoyer",
+            placeholder="Ex. Bienvenue {user} sur {server} !",
+            default=current[:4000],
+            max_length=2000,
+            style=discord.TextStyle.paragraph,
+            required=True,
+        )
+        self.add_item(self.message_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        data = load_data()
+        gd = get_guild_data(data, interaction.guild_id)
+        gd[f"{self.kind}_message"] = str(self.message_input.value)
+        save_data(data)
+        await interaction.response.send_message("Message enregistré.", ephemeral=True)
+
+
+class WelcomeChannelSelect(discord.ui.ChannelSelect):
+    def __init__(self, kind: str):
+        self.kind = kind
+        super().__init__(placeholder="Choisir le salon de publication", channel_types=[discord.ChannelType.text], min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        data = load_data()
+        gd = get_guild_data(data, interaction.guild_id)
+        gd[f"{self.kind}_channel_id"] = self.values[0].id
+        save_data(data)
+        await interaction.response.edit_message(embed=welcome_panel_embed(interaction.guild, self.kind), view=WelcomeMessagePanel(self.kind, interaction.guild_id))
+
+
+class WelcomeDelaySelect(discord.ui.Select):
+    def __init__(self, kind: str, current: int):
+        self.kind = kind
+        options = [
+            discord.SelectOption(label="Ne jamais supprimer", value="0", description="Le message reste dans le salon"),
+            discord.SelectOption(label="10 secondes", value="10"),
+            discord.SelectOption(label="30 secondes", value="30"),
+            discord.SelectOption(label="1 minute", value="60"),
+            discord.SelectOption(label="5 minutes", value="300"),
+            discord.SelectOption(label="10 minutes", value="600"),
+            discord.SelectOption(label="30 minutes", value="1800"),
+            discord.SelectOption(label="1 heure", value="3600"),
+        ]
+        super().__init__(placeholder="Délai avant suppression automatique", min_values=1, max_values=1, options=options)
+        self.default_value = str(current)
+        for option in self.options:
+            option.default = option.value == self.default_value
+
+    async def callback(self, interaction: discord.Interaction):
+        data = load_data()
+        gd = get_guild_data(data, interaction.guild_id)
+        gd[f"{self.kind}_delete_after"] = int(self.values[0])
+        save_data(data)
+        await interaction.response.edit_message(embed=welcome_panel_embed(interaction.guild, self.kind), view=WelcomeMessagePanel(self.kind, interaction.guild_id))
+
+
+class WelcomeMessagePanel(discord.ui.View):
+    def __init__(self, kind: str, guild_id: int):
+        super().__init__(timeout=900)
+        self.kind = kind
+        self.guild_id = guild_id
+        gd = get_guild_data(load_data(), guild_id)
+        self.add_item(WelcomeChannelSelect(kind))
+        self.add_item(WelcomeDelaySelect(kind, int(gd.get(f"{kind}_delete_after", 0))))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not interaction.user.guild_permissions.administrator and not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message("Tu dois être administrateur ou gérer le serveur pour modifier ce panel.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Modifier le message", style=discord.ButtonStyle.primary, row=2)
+    async def edit_message_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = load_data()
+        gd = get_guild_data(data, interaction.guild_id)
+        current = gd.get(f"{self.kind}_message", "Bienvenue {user} sur {server}." if self.kind == "join" else "{user} a quitté {server}.")
+        await interaction.response.send_modal(WelcomeMessageModal(self.kind, current))
+
+    @discord.ui.button(label="Activer / désactiver", style=discord.ButtonStyle.danger, row=2)
+    async def toggle_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = load_data()
+        gd = get_guild_data(data, interaction.guild_id)
+        key = f"{self.kind}_enabled"
+        gd[key] = not gd.get(key, True)
+        save_data(data)
+        await interaction.response.edit_message(embed=welcome_panel_embed(interaction.guild, self.kind), view=WelcomeMessagePanel(self.kind, interaction.guild_id))
+
+
+def welcome_panel_embed(guild: discord.Guild, kind: str) -> discord.Embed:
+    data = load_data()
+    gd = get_guild_data(data, guild.id)
+    is_join = kind == "join"
+    title = f"Message d'arrivée de {guild.name}" if is_join else f"Message de départ de {guild.name}"
+    message = gd.get(f"{kind}_message", "Bienvenue {user} sur {server}." if is_join else "{user} a quitté {server}.")
+    channel_id = gd.get(f"{kind}_channel_id", 0)
+    channel = guild.get_channel(int(channel_id)) if channel_id else None
+    delay = int(gd.get(f"{kind}_delete_after", 0))
+    enabled = gd.get(f"{kind}_enabled", True)
+    delay_text = "Jamais" if delay == 0 else format_duration(delay)
+    embed = make_embed(title, emoji="user")
+    embed.description = (
+        f"**État :** {'Activé' if enabled else 'Désactivé'}\n"
+        f"**Salon :** {channel.mention if channel else 'Non configuré'}\n"
+        f"**Message :** {message}\n"
+        f"**Suppression automatique :** {delay_text}\n\n"
+        "Variables disponibles : `{user}` et `{server}`."
+    )
+    return embed
+
+
 @bot.command(name="joinmessage")
 @commands.has_permissions(administrator=True)
-async def joinmessage(ctx, *, message: str):
+async def joinmessage(ctx):
     data = load_data()
-    get_guild_data(data, ctx.guild.id)["join_message"] = message
+    gd = get_guild_data(data, ctx.guild.id)
+    gd.setdefault("join_enabled", True)
+    gd.setdefault("join_delete_after", 0)
+    gd.setdefault("join_channel_id", 0)
+    gd.setdefault("join_message", "Bienvenue {user} sur {server}.")
     save_data(data)
-    await reply_embed(ctx, "Message d'arrivée configuré",
-                      "Variables disponibles : `{user}` et `{server}`.", "success")
+    await ctx.send(embed=welcome_panel_embed(ctx.guild, "join"), view=WelcomeMessagePanel("join", ctx.guild.id))
+
 
 @bot.command(name="leavemessage")
 @commands.has_permissions(administrator=True)
-async def leavemessage(ctx, *, message: str):
+async def leavemessage(ctx):
     data = load_data()
-    get_guild_data(data, ctx.guild.id)["leave_message"] = message
+    gd = get_guild_data(data, ctx.guild.id)
+    gd.setdefault("leave_enabled", True)
+    gd.setdefault("leave_delete_after", 0)
+    gd.setdefault("leave_channel_id", 0)
+    gd.setdefault("leave_message", "{user} a quitté {server}.")
     save_data(data)
-    await reply_embed(ctx, "Message de départ configuré",
-                      "Variables disponibles : `{user}` et `{server}`.", "success")
+    await ctx.send(embed=welcome_panel_embed(ctx.guild, "leave"), view=WelcomeMessagePanel("leave", ctx.guild.id))
+
 
 @bot.event
 async def on_member_join(member):
     data = load_data()
     gd = get_guild_data(data, member.guild.id)
-    channel_id = gd.get("logs_channel") or data.get("logs_channel") or LOG_CHANNEL_ID
+    if not gd.get("join_enabled", True):
+        return
+    channel_id = gd.get("join_channel_id") or gd.get("logs_channel") or data.get("logs_channel") or LOG_CHANNEL_ID
     channel = member.guild.get_channel(int(channel_id)) if channel_id else None
     if channel:
-        text = gd.get("join_message", "Bienvenue {user} sur {server}.").format(user=member.mention, server=member.guild.name)
-        await channel.send(embed=make_embed("Arrivée d'un membre", text, "user"))
+        template = gd.get("join_message", "Bienvenue {user} sur {server}.")
+        text = template.replace("{user}", member.mention).replace("{server}", member.guild.name)
+        try:
+            delay = max(0, int(gd.get("join_delete_after", 0)))
+            message = await channel.send(embed=make_embed(f"Arrivée sur {member.guild.name}", text, "user"))
+            if delay:
+                await message.delete(delay=delay)
+        except discord.Forbidden:
+            pass
+
 
 @bot.event
 async def on_member_remove(member):
     data = load_data()
     gd = get_guild_data(data, member.guild.id)
-    channel_id = gd.get("logs_channel") or data.get("logs_channel") or LOG_CHANNEL_ID
+    if not gd.get("leave_enabled", True):
+        return
+    channel_id = gd.get("leave_channel_id") or gd.get("logs_channel") or data.get("logs_channel") or LOG_CHANNEL_ID
     channel = member.guild.get_channel(int(channel_id)) if channel_id else None
     if channel:
-        text = gd.get("leave_message", "{user} a quitté {server}.").format(user=str(member), server=member.guild.name)
-        await channel.send(embed=make_embed("Départ d'un membre", text, "user"))
+        template = gd.get("leave_message", "{user} a quitté {server}.")
+        text = template.replace("{user}", str(member)).replace("{server}", member.guild.name)
+        try:
+            delay = max(0, int(gd.get("leave_delete_after", 0)))
+            message = await channel.send(embed=make_embed(f"Départ de {member.guild.name}", text, "user"))
+            if delay:
+                await message.delete(delay=delay)
+        except discord.Forbidden:
+            pass
 
 @bot.command(name="say")
 @commands.has_permissions(manage_messages=True)
