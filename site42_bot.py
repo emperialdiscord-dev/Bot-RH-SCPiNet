@@ -37,29 +37,29 @@ EMBED_COLOR = BLACK
 # Remplace chaque valeur par TON emoji personnalisé.
 # Format statique : <:nom:ID> | animé : <a:nom:ID>
 EMOJIS = {
-    "success": "<:success:1559889063425613844>",
-    "error": "<:failure:1559889036447842314>",
-    "warning": "<:warning:1559889250693161020>",
-    "info": "<:info:1559889082702766180>",
-    "moderation": "<:moderation:1559889166416879646>",
-    "ticket": "<:ticket:1559889138193403904>",
+    "success": "<:EMOJI_SUCCESS:123456789012345678>",
+    "error": "EMOJI_ERREUR",
+    "warning": "EMOJI_AVERTISSEMENT",
+    "info": "EMOJI_INFO",
+    "moderation": "EMOJI_MODERATION",
+    "ticket": "EMOJI_TICKET",
     "ticket_purchase": "EMOJI_TICKET_ACHAT",
-    "ticket_support": "<:questionk:1559888404471091231>",
-    "ticket_close": "<:close:1559889112176263209>",
-    "giveaway": "<:giveaway:1559888839240323173>",
-    "user": "<:user:1559889195013513286>",
-    "role": "<:role:1559889224092614797>",
-    "channel": "<:channel:1559888467985694741>",
-    "logs": "<:logs:1559888896869793812>",
-    "stats": "<:stats:1559888871456772116>",
-    "lock": "<:locked:1559888803148333116>",
-    "unlock": "<:unlocked:1559888774630998067>",
-    "loading": "<a:308215loading:1559883100710764624>",
-    "arrow": "<:arrow:1559888531751436338>",
-    "crown": "<a:881980whitecrown:1559882921463128094>",
-    "calendar": "<:calendar:1559882613416534097>",
-    "link": "<:link:1559888507571408916>",
-    "bot": "<:bot:1559889473691586740>",
+    "ticket_support": "EMOJI_TICKET_SUPPORT",
+    "ticket_close": "EMOJI_TICKET_FERMER",
+    "giveaway": "EMOJI_GIVEAWAY",
+    "user": "EMOJI_MEMBRE",
+    "role": "EMOJI_ROLE",
+    "channel": "EMOJI_SALON",
+    "logs": "EMOJI_LOGS",
+    "stats": "EMOJI_STATS",
+    "lock": "EMOJI_VERROU",
+    "unlock": "EMOJI_DEVERROU",
+    "loading": "EMOJI_CHARGEMENT",
+    "arrow": "EMOJI_FLECHE",
+    "crown": "EMOJI_COURONNE",
+    "calendar": "EMOJI_CALENDRIER",
+    "link": "EMOJI_LIEN",
+    "bot": "EMOJI_BOT",
 }
 
 def em(key: str) -> str:
@@ -104,7 +104,7 @@ COMMAND_LEVELS = {
     "kick": 6, "adminlist": 6, "admin-list": 6, "rank": 6, "rank-clear": 6,
     # P7 — Gestion
     "tempban": 7, "unban": 7, "derank": 7, "del-sanction": 7,
-    "lock": 7, "unlock": 7, "banlist": 7, "lockall": 7, "unlockall": 7,
+    "lock": 7, "unlock": 7, "banlist": 7, "lockall": 7, "unlockall": 7, "clear": 7,
     # P8 — Direction
     "ban": 8, "wl": 8, "giveaway": 8, "gcancel": 8, "gend": 8,
     "reroll": 8, "glist": 8,
@@ -114,6 +114,9 @@ OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "0") or 0)
 
 # IDs facultatifs à configurer.
 LOG_CHANNEL_ID = 0
+# Role automatique si le statut personnalisé contient .gg/acapulco ou /acapulco.
+# Remplace 0 par l’ID numérique du rôle Discord.
+ACAPULCO_STATUS_ROLE_ID = 0
 TICKET_CATEGORY_ID = 0
 TICKET_STAFF_ROLE_ID = 0
 GIVEAWAY_HOST_ROLE_ID = 0
@@ -287,7 +290,42 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+# Nécessaire pour lire les statuts personnalisés des membres. À activer aussi dans
+# Discord Developer Portal > Bot > Privileged Gateway Intents > Presence Intent.
+intents.presences = True
 bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
+
+
+@bot.event
+async def on_presence_update(before: discord.Member, after: discord.Member):
+    """Attribue le rôle configuré quand le statut personnalisé contient l’invitation Acapulco.
+
+    L’API officielle des bots Discord ne donne pas accès à la bio/About Me. Seul le statut
+    personnalisé est vérifié ici. Le rôle est retiré si le membre ne correspond plus.
+    """
+    if not ACAPULCO_STATUS_ROLE_ID or after.bot:
+        return
+    guild = after.guild
+    role = guild.get_role(ACAPULCO_STATUS_ROLE_ID)
+    if role is None:
+        return
+
+    keywords = (".gg/acapulco", "/acapulco")
+    custom_status = ""
+    for activity in (after.activities or []):
+        if isinstance(activity, discord.CustomActivity) and activity.name:
+            custom_status = activity.name.casefold()
+            break
+    matches = any(keyword in custom_status for keyword in keywords)
+    has_role = role in after.roles
+
+    try:
+        if matches and not has_role:
+            await after.add_roles(role, reason="Statut personnalisé contenant .gg/acapulco ou /acapulco")
+        elif not matches and has_role:
+            await after.remove_roles(role, reason="Le statut personnalisé ne contient plus l’invitation Acapulco")
+    except (discord.Forbidden, discord.HTTPException) as exc:
+        print(f"[ACAPULCO ROLE] Impossible de modifier le rôle pour {after.id}: {exc}")
 
 
 @bot.event
@@ -601,6 +639,30 @@ async def staff_list_cmd(ctx):
     members = [m for m in ctx.guild.members if staff_level(m) > 0]
     description = "\n".join(f"{m.mention} — niveau {staff_level(m)}" for m in members[:50])
     await ctx.send(embed=make_embed("Équipe du staff", description or "Aucun rôle de staff configuré.", "user"))
+
+
+# ============================================================
+# MODÉRATION : SUPPRESSION DE MESSAGES
+# ============================================================
+
+@bot.command(name="clear", aliases=["purge"])
+async def clear_cmd(ctx, nombre: int):
+    # La permission de niveau est appliquée par le contrôle global : P7, P8 ou P9.
+    if not await staff_check(ctx, "clear"):
+        return
+    if nombre < 1 or nombre > 1000:
+        return await ctx.send("Indique un nombre entre 1 et 1000. Exemple : `=clear 25`.")
+    if not ctx.channel.permissions_for(ctx.guild.me).manage_messages:
+        return await ctx.send("Je n'ai pas la permission **Gérer les messages** dans ce salon.")
+    try:
+        deleted = await ctx.channel.purge(limit=nombre + 1, bulk=True, reason=f"Commande clear par {ctx.author} ({ctx.author.id})")
+        # Inclut le message de commande s'il est dans les messages supprimés.
+        count = sum(1 for message in deleted if message.id != ctx.message.id)
+        await ctx.send(f"{count} message(s) supprimé(s) dans {ctx.channel.mention}.", delete_after=5)
+    except discord.Forbidden:
+        await ctx.send("Suppression impossible : vérifie mes permissions **Gérer les messages**.")
+    except discord.HTTPException as exc:
+        await ctx.send(f"Discord n'a pas pu supprimer les messages ({exc.status}).")
 
 
 # ============================================================
