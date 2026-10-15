@@ -37,29 +37,29 @@ EMBED_COLOR = BLACK
 # Remplace chaque valeur par TON emoji personnalisé.
 # Format statique : <:nom:ID> | animé : <a:nom:ID>
 EMOJIS = {
-    "success": "<:EMOJI_SUCCESS:123456789012345678>",
-    "error": "EMOJI_ERREUR",
-    "warning": "EMOJI_AVERTISSEMENT",
-    "info": "EMOJI_INFO",
-    "moderation": "EMOJI_MODERATION",
-    "ticket": "EMOJI_TICKET",
+    "success": "<:success:1559889063425613844>",
+    "error": "<:failure:1559889036447842314>",
+    "warning": "<:warning:1559889250693161020>",
+    "info": "<:info:1559889082702766180>",
+    "moderation": "<:moderation:1559889166416879646>",
+    "ticket": "<:ticket:1559889138193403904>",
     "ticket_purchase": "EMOJI_TICKET_ACHAT",
-    "ticket_support": "EMOJI_TICKET_SUPPORT",
-    "ticket_close": "EMOJI_TICKET_FERMER",
-    "giveaway": "EMOJI_GIVEAWAY",
-    "user": "EMOJI_MEMBRE",
-    "role": "EMOJI_ROLE",
-    "channel": "EMOJI_SALON",
-    "logs": "EMOJI_LOGS",
-    "stats": "EMOJI_STATS",
-    "lock": "EMOJI_VERROU",
-    "unlock": "EMOJI_DEVERROU",
-    "loading": "EMOJI_CHARGEMENT",
-    "arrow": "EMOJI_FLECHE",
-    "crown": "EMOJI_COURONNE",
-    "calendar": "EMOJI_CALENDRIER",
-    "link": "EMOJI_LIEN",
-    "bot": "EMOJI_BOT",
+    "ticket_support": "<:questionk:1559888404471091231>",
+    "ticket_close": "<:close:1559889112176263209>",
+    "giveaway": "<:giveaway:1559888839240323173>",
+    "user": "<:user:1559889195013513286>",
+    "role": "<:role:1559889224092614797>",
+    "channel": "<:channel:1559888467985694741>",
+    "logs": "<:logs:1559888896869793812>",
+    "stats": "<:stats:1559888871456772116>",
+    "lock": "<:locked:1559888803148333116>",
+    "unlock": "<:unlocked:1559888774630998067>",
+    "loading": "<a:308215loading:1559883100710764624>",
+    "arrow": "<:arrow:1559888531751436338>",
+    "crown": "<a:881980whitecrown:1559882921463128094>",
+    "calendar": "<:calendar:1559882613416534097>",
+    "link": "<:link:1559888507571408916>",
+    "bot": "<:bot:1559889473691586740>",
 }
 
 def em(key: str) -> str:
@@ -116,7 +116,7 @@ OWNER_USER_ID = int(os.getenv("OWNER_USER_ID", "0") or 0)
 LOG_CHANNEL_ID = 0
 # Role automatique si le statut personnalisé contient .gg/acapulco ou /acapulco.
 # Remplace 0 par l’ID numérique du rôle Discord.
-ACAPULCO_STATUS_ROLE_ID = 0
+ACAPULCO_STATUS_ROLE_ID = 1560351043714420817
 TICKET_CATEGORY_ID = 0
 TICKET_STAFF_ROLE_ID = 0
 GIVEAWAY_HOST_ROLE_ID = 0
